@@ -129,6 +129,31 @@ if app_uid and tun_uid:
 
 # ── updater safety ───────────────────────────────────────────────────
 
+installer = read("deploy", "install.sh") or ""
+
+# The installer is interactive on a first run, which brings its own hazards:
+# a prompt that blocks forever under systemd, or a token that lands somewhere
+# it should not.
+check("installer refuses to run as root", "not root" in installer)
+check("installer has a non-interactive path", "--yes" in installer and "ASSUME_YES" in installer)
+check("installer drops to non-interactive without a TTY (never hangs on a prompt)",
+      "[ -t 0 ]" in installer)
+check("installer never overwrites an existing config unless asked",
+      "--reconfigure" in installer and 'if [ ! -f "$CONFIG" ]' in installer)
+# Token handling: silent read, printf (never echo, which appends a newline that
+# cloudflared rejects), and never written to a file.
+check("installer reads the token with echo off", "read -rs" in installer)
+check("installer pipes the token through printf, not echo",
+      "printf '%s' \"$FLORUN_TOKEN\" | podman secret create" in installer)
+check("installer clears the token variable afterwards", "unset FLORUN_TOKEN" in installer)
+check("installer never writes the token to a file",
+      not re.search(r"FLORUN_TOKEN\"?\s*>", installer))
+check("installer validates UIDs against the UserNS size",
+      "USERNS_SIZE" in installer and "must be below the UserNS size" in installer)
+check("installer rejects identical container UIDs",
+      "must differ from the nginx UID" in installer)
+check("generated config is written owner-only", "umask 077" in installer)
+
 check("updater refuses to run as root", 'id -u' in updater and "must not run as root" in updater)
 check("updater parses config as data, never sources it",
       "sed -n" in updater and not re.search(r"^\s*(\.|source)\s+\S*config\.florun", updater, re.M))

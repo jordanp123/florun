@@ -7,27 +7,37 @@
 # ${VAR}. This script reads config.florun once and writes the real UIDs, names,
 # subpath and webroot into the installed copies, so config.florun stays the
 # single source of truth and nothing is ever hand-edited.
+#
+# On a first install (no config.florun yet) it runs an interactive setup that
+# writes the file for you. Re-running it later never re-interrogates you: an
+# existing config.florun is read and validated, not replaced.
 set -eEu
 
 usage() {
   cat <<'USAGE'
-Usage: deploy/install.sh [--yes] [--base-dir PATH]
+Usage: deploy/install.sh [--yes] [--base-dir PATH] [--reconfigure]
 
-  --yes             accept the detected webroot without prompting
-  --base-dir PATH   webroot to install for (or set FLORUN_BASE=PATH)
-  --help            this message
+  --yes, -y         non-interactive: accept the detected webroot and take the
+                    default for every setting. Never prompts, never touches a
+                    secret, never starts anything.
+  --base-dir PATH   webroot to install into (or set FLORUN_BASE=PATH)
+  --reconfigure     re-run the interactive setup even though config.florun
+                    already exists (the current values become the defaults)
+  --help, -h        this message
 
-The webroot is the directory holding config.florun, with the git checkout
+The webroot is the directory that holds config.florun, with the git checkout
 inside it. Typically ~/florun.
 USAGE
 }
 
 ASSUME_YES=0
+RECONFIGURE=0
 BASE_ARG="${FLORUN_BASE:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes|-y) ASSUME_YES=1; shift ;;
     --base-dir) BASE_ARG="${2:-}"; shift 2 ;;
+    --reconfigure) RECONFIGURE=1; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
   esac
@@ -40,57 +50,235 @@ if [ "$(id -u)" -eq 0 ]; then
   exit 1
 fi
 
+# Interactive only when there is a terminal to talk to. Under systemd, cron or
+# CI there is not, and a blocked prompt would hang the run forever.
+INTERACTIVE=1
+[ "$ASSUME_YES" -eq 1 ] && INTERACTIVE=0
+[ -t 0 ] || INTERACTIVE=0
+
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"     # .../<checkout>/deploy
 REPO_DIR="$(cd "$SELF_DIR/.." && pwd)"        # .../<checkout>
 
-# Locate the webroot: explicit flag, else the checkout's parent.
+# ── prompt helpers ───────────────────────────────────────────────────
+
+# ask VAR "Prompt" "default" [validator]
+# Re-asks until the validator accepts. Non-interactive runs take the default
+# without asking (and still validate it, so a bad default fails loudly).
+ask() {
+  local __var="$1" __prompt="$2" __default="$3" __validate="${4:-}"
+  local __value
+  while :; do
+    if [ "$INTERACTIVE" -eq 0 ]; then
+      __value="$__default"
+    else
+      printf '  %s [%s]: ' "$__prompt" "$__default" >&2
+      IFS= read -r __value || __value=""
+      [ -z "$__value" ] && __value="$__default"
+    fi
+    if [ -z "$__validate" ] || "$__validate" "$__value"; then
+      printf -v "$__var" '%s' "$__value"
+      return 0
+    fi
+    if [ "$INTERACTIVE" -eq 0 ]; then
+      echo "FATAL: default value '$__value' for $__var is invalid." >&2
+      exit 1
+    fi
+  done
+}
+
+# confirm "Question" default(y|n) -> returns 0 for yes
+confirm() {
+  local __prompt="$1" __default="${2:-n}" __reply __hint
+  if [ "$__default" = "y" ]; then __hint="[Y/n]"; else __hint="[y/N]"; fi
+  if [ "$INTERACTIVE" -eq 0 ]; then
+    [ "$__default" = "y" ]
+    return
+  fi
+  printf '  %s %s ' "$__prompt" "$__hint" >&2
+  IFS= read -r __reply || __reply=""
+  [ -z "$__reply" ] && __reply="$__default"
+  case "$__reply" in y|Y|yes|YES|Yes) return 0 ;; *) return 1 ;; esac
+}
+
+heading() { printf '\n\033[1m%s\033[0m\n' "$1" >&2; }
+note()    { printf '  %s\n' "$1" >&2; }
+bad()     { printf '  !! %s\n' "$1" >&2; }
+
+# ── validators (same rules the updater enforces at 05:00) ────────────
+
+v_repo_url() {
+  case "$1" in
+    "") bad "cannot be empty"; return 1 ;;
+    http://*|https://*|git@*|ssh://*) return 0 ;;
+    *) bad "expected an http(s), git@ or ssh:// URL"; return 1 ;;
+  esac
+}
+v_dirname() {
+  case "$1" in
+    ""|.|..) bad "must be a plain directory name"; return 1 ;;
+    *..*) bad "must not contain '..'"; return 1 ;;
+    *[!A-Za-z0-9._-]*) bad "only letters, digits and . _ - are allowed"; return 1 ;;
+    *) return 0 ;;
+  esac
+}
+v_stack() {
+  case "$1" in
+    "") bad "cannot be empty"; return 1 ;;
+    *[!A-Za-z0-9_-]*) bad "only letters, digits, _ and - are allowed"; return 1 ;;
+    *) return 0 ;;
+  esac
+}
+v_subpath() {
+  case "$1" in
+    .) return 0 ;;
+    "") bad "cannot be empty (use '.' to serve at the domain root)"; return 1 ;;
+    *..*) bad "must not contain '..'"; return 1 ;;
+    *[!A-Za-z0-9._-]*) bad "only letters, digits and . _ - are allowed"; return 1 ;;
+    *) return 0 ;;
+  esac
+}
+USERNS_SIZE=65536
+v_uid() {
+  case "$1" in
+    ""|*[!0-9]*) bad "must be numeric"; return 1 ;;
+    0) bad "must not be root (0)"; return 1 ;;
+  esac
+  # A UID at or above the namespace size has nowhere to map and the container
+  # simply will not start. Catch it here, not at 05:00.
+  if [ "$1" -ge "$USERNS_SIZE" ]; then
+    bad "must be below the UserNS size ($USERNS_SIZE) or the container cannot start"
+    return 1
+  fi
+  return 0
+}
+
+# ── locate the webroot ───────────────────────────────────────────────
+
 if [ -n "$BASE_ARG" ]; then
-  BASE="$(cd "$BASE_ARG" 2>/dev/null && pwd)" || { echo "FATAL: --base-dir '$BASE_ARG' does not exist" >&2; exit 1; }
+  BASE="$(cd "$BASE_ARG" 2>/dev/null && pwd)" || {
+    echo "FATAL: --base-dir '$BASE_ARG' does not exist" >&2; exit 1; }
 else
   BASE="$(cd "$REPO_DIR/.." && pwd)"
 fi
 
-echo "Webroot:  $BASE"
-echo "Checkout: $REPO_DIR"
-if [ ! -f "$BASE/config.florun" ]; then
-  echo >&2
-  echo "FATAL: $BASE/config.florun not found." >&2
-  echo "Create it first:" >&2
-  echo "  cp $REPO_DIR/config.florun.example $BASE/config.florun" >&2
-  echo "then edit it and re-run this script." >&2
-  exit 1
-fi
-if [ "$ASSUME_YES" -ne 1 ]; then
-  printf 'Install units for this webroot? [y/N] '
-  read -r reply
-  case "$reply" in y|Y|yes|YES) ;; *) echo "Aborted; nothing was changed."; exit 1 ;; esac
+heading "FloRun installer"
+note "Webroot:  $BASE"
+note "Checkout: $REPO_DIR"
+
+if [ "$INTERACTIVE" -eq 1 ]; then
+  confirm "Install for this webroot?" y || { echo "Aborted; nothing was changed." >&2; exit 1; }
 fi
 
-# ── config (parsed as DATA, never sourced) ───────────────────────────
-cfg() { sed -n "s/^$1=//p" "$BASE/config.florun" | tail -1 | tr -d '\r'; }
-APP_UID="$(cfg APP_UID)"
-TUNNEL_UID="$(cfg TUNNEL_UID)"
-STACK_NAME="$(cfg STACK_NAME)"
-SUBPATH="$(cfg SUBPATH)"
-CHECKOUT_DIR="$(cfg CHECKOUT_DIR)"
+CONFIG="$BASE/config.florun"
 
-case "$APP_UID" in    *[!0-9]*|""|0) echo "FATAL: APP_UID must be a non-root numeric UID" >&2; exit 1 ;; esac
-case "$TUNNEL_UID" in *[!0-9]*|""|0) echo "FATAL: TUNNEL_UID must be a non-root numeric UID" >&2; exit 1 ;; esac
-case "$STACK_NAME" in *[!A-Za-z0-9_-]*|"") echo "FATAL: STACK_NAME must be non-empty, characters A-Za-z0-9_-" >&2; exit 1 ;; esac
-case "$SUBPATH" in
-  .) ;;
-  *[!A-Za-z0-9._-]*|""|*..*) echo "FATAL: SUBPATH must be a plain path segment or '.'" >&2; exit 1 ;;
-esac
-case "$CHECKOUT_DIR" in *[!A-Za-z0-9._-]*|""|.|..|*..*) echo "FATAL: CHECKOUT_DIR must be a plain directory name" >&2; exit 1 ;; esac
+# ── configuration ────────────────────────────────────────────────────
 
-# A UID with nowhere to land inside the user namespace cannot start. Refuse the
-# install now rather than let it fail silently at 05:00.
-USERNS_SIZE=65536
-if [ "$APP_UID" -ge "$USERNS_SIZE" ] || [ "$TUNNEL_UID" -ge "$USERNS_SIZE" ]; then
-  echo "FATAL: APP_UID and TUNNEL_UID must both be below the UserNS size ($USERNS_SIZE)." >&2
-  echo "A UID above the mapping has nowhere to land and the container will not start." >&2
-  exit 1
+# Defaults come from an existing config when there is one, so --reconfigure
+# offers your current values back rather than the stock ones.
+d_repo="https://github.com/jordanp123/florun.git"
+d_checkout="FloRunWeb"
+d_stack="FloRun"
+d_app_uid="17011"
+d_tunnel_uid="17010"
+d_subpath="."
+
+cfg_get() { sed -n "s/^$1=//p" "$CONFIG" 2>/dev/null | tail -1 | tr -d '\r'; }
+
+if [ -f "$CONFIG" ]; then
+  [ -n "$(cfg_get REPO_URL)" ]     && d_repo="$(cfg_get REPO_URL)"
+  [ -n "$(cfg_get CHECKOUT_DIR)" ] && d_checkout="$(cfg_get CHECKOUT_DIR)"
+  [ -n "$(cfg_get STACK_NAME)" ]   && d_stack="$(cfg_get STACK_NAME)"
+  [ -n "$(cfg_get APP_UID)" ]      && d_app_uid="$(cfg_get APP_UID)"
+  [ -n "$(cfg_get TUNNEL_UID)" ]   && d_tunnel_uid="$(cfg_get TUNNEL_UID)"
+  [ -n "$(cfg_get SUBPATH)" ]      && d_subpath="$(cfg_get SUBPATH)"
 fi
+
+WRITE_CONFIG=0
+if [ ! -f "$CONFIG" ]; then
+  WRITE_CONFIG=1
+  heading "Setting up config.florun"
+  if [ "$INTERACTIVE" -eq 1 ]; then
+    note "No config.florun yet, so let's create one."
+    note "Press Enter to accept the value shown in brackets."
+    note ""
+  else
+    note "No config.florun yet; writing one from the defaults (--yes)."
+  fi
+elif [ "$RECONFIGURE" -eq 1 ]; then
+  WRITE_CONFIG=1
+  heading "Reconfiguring config.florun"
+  note "Current values are offered as the defaults."
+  note ""
+else
+  heading "Using existing config.florun"
+  note "$CONFIG"
+  note "Re-run with --reconfigure to change these values interactively."
+fi
+
+if [ "$WRITE_CONFIG" -eq 1 ]; then
+  ask REPO_URL     "Git repository URL" "$d_repo"          v_repo_url
+  ask CHECKOUT_DIR "Checkout directory name (under the webroot)" "$d_checkout" v_dirname
+  ask STACK_NAME   "Stack name (container name prefix)" "$d_stack" v_stack
+  ask APP_UID      "UID for the nginx container" "$d_app_uid"      v_uid
+
+  # The tunnel UID is validated against the nginx one HERE rather than after
+  # the remaining questions: being told about a clash only once you have
+  # answered everything else, and then thrown back three prompts, is the kind
+  # of thing that makes an installer feel broken.
+  while :; do
+    ask TUNNEL_UID "UID for the tunnel container" "$d_tunnel_uid" v_uid
+    if [ "$TUNNEL_UID" != "$APP_UID" ]; then
+      break
+    fi
+    # Distinct UIDs are the point: one compromised container must not be able
+    # to touch the other's processes.
+    bad "must differ from the nginx UID ($APP_UID), so neither container can"
+    bad "touch the other's processes"
+    if [ "$INTERACTIVE" -eq 0 ]; then
+      echo "FATAL: APP_UID and TUNNEL_UID must differ." >&2
+      exit 1
+    fi
+  done
+
+  ask SUBPATH      "URL subpath, or '.' for the domain root" "$d_subpath" v_subpath
+
+  # Written fresh rather than sed-patched, so the file always matches what this
+  # version of the installer understands. 0600: it holds no secrets, but it
+  # describes the host's layout and there is no reason for siblings to read it.
+  umask 077
+  cat > "$CONFIG" <<CONFIGEOF
+# FloRun deployment configuration.
+# Generated by deploy/install.sh on $(date -u +%FT%TZ).
+#
+# Plain KEY=value, no spaces around '=', no quotes. The updater parses this as
+# DATA (it is never executed) and validates every value before touching
+# anything. Holds NO secrets: the Cloudflare tunnel token lives in a podman
+# secret. Re-run 'deploy/install.sh --reconfigure' to change these values.
+
+REPO_URL=$REPO_URL
+CHECKOUT_DIR=$CHECKOUT_DIR
+APP_UID=$APP_UID
+TUNNEL_UID=$TUNNEL_UID
+STACK_NAME=$STACK_NAME
+SUBPATH=$SUBPATH
+CONFIGEOF
+  umask 022
+  note ""
+  note "Wrote $CONFIG"
+else
+  REPO_URL="$d_repo"; CHECKOUT_DIR="$d_checkout"; STACK_NAME="$d_stack"
+  APP_UID="$d_app_uid"; TUNNEL_UID="$d_tunnel_uid"; SUBPATH="$d_subpath"
+fi
+
+# Validate whatever we ended up with -- an existing hand-edited config gets the
+# same scrutiny as a freshly generated one.
+v_repo_url "$REPO_URL" || { echo "FATAL: bad REPO_URL in $CONFIG" >&2; exit 1; }
+v_dirname  "$CHECKOUT_DIR" || { echo "FATAL: bad CHECKOUT_DIR in $CONFIG" >&2; exit 1; }
+v_stack    "$STACK_NAME" || { echo "FATAL: bad STACK_NAME in $CONFIG" >&2; exit 1; }
+v_subpath  "$SUBPATH" || { echo "FATAL: bad SUBPATH in $CONFIG" >&2; exit 1; }
+v_uid      "$APP_UID" || { echo "FATAL: bad APP_UID in $CONFIG" >&2; exit 1; }
+v_uid      "$TUNNEL_UID" || { echo "FATAL: bad TUNNEL_UID in $CONFIG" >&2; exit 1; }
+[ "$APP_UID" != "$TUNNEL_UID" ] || { echo "FATAL: APP_UID and TUNNEL_UID must differ" >&2; exit 1; }
 
 # Subuid sizing: each container gets its own 65536 range, so this stack needs
 # 131072 -- twice what a distro typically allocates. Warn (do not fail): the
@@ -99,32 +287,88 @@ if [ -r /etc/subuid ]; then
   have="$(awk -F: -v u="$(id -un)" '$1==u {sum+=$3} END {print sum+0}' /etc/subuid)"
   need=$((USERNS_SIZE * 2))
   if [ "$have" -lt "$need" ]; then
-    echo
-    echo "WARNING: /etc/subuid grants $(id -un) $have subordinate UIDs; this stack wants $need"
-    echo "         (2 containers x $USERNS_SIZE). If the containers fail to start, widen the"
-    echo "         range in /etc/subuid AND /etc/subgid, then: podman system migrate"
+    heading "Warning: subordinate UID range looks too small"
+    note "/etc/subuid grants $(id -un) $have subordinate UIDs; this stack wants $need"
+    note "(2 containers x $USERNS_SIZE). If the containers fail to start, widen the"
+    note "range in /etc/subuid AND /etc/subgid, then: podman system migrate"
   fi
 fi
+
+# ── tunnel token ─────────────────────────────────────────────────────
+# Offered here because the updater refuses to run without it, and because the
+# token has one specific trap: a trailing newline is stored verbatim and
+# cloudflared then rejects it with a confusing auth error. Reading with -r -s
+# and piping through printf avoids that, keeps the token off the screen, and
+# keeps it out of shell history and out of every file in the deployment.
+
+secret_exists() {
+  podman secret exists florun-tunnel-token 2>/dev/null && return 0
+  podman secret inspect florun-tunnel-token >/dev/null 2>&1
+}
+
+if command -v podman >/dev/null 2>&1; then
+  heading "Cloudflare tunnel token"
+  if secret_exists; then
+    note "podman secret 'florun-tunnel-token' already exists -- leaving it alone."
+    note "To rotate it:  podman secret rm florun-tunnel-token && re-run this script"
+  elif [ "$INTERACTIVE" -eq 1 ]; then
+    note "Stored as a podman secret, never in a file, this repo or your shell history."
+    note "Create one in the Cloudflare Zero Trust dashboard, then route the hostname"
+    note "to  http://website:8080"
+    note ""
+    if confirm "Enter the tunnel token now?" y; then
+      while :; do
+        printf '  Token (input hidden): ' >&2
+        IFS= read -rs FLORUN_TOKEN || FLORUN_TOKEN=""
+        printf '\n' >&2
+        if [ -z "$FLORUN_TOKEN" ]; then
+          bad "Nothing entered."
+          confirm "Try again?" y || break
+          continue
+        fi
+        # printf, never echo: no trailing newline may reach the secret.
+        if printf '%s' "$FLORUN_TOKEN" | podman secret create florun-tunnel-token - >/dev/null 2>&1; then
+          note "Secret 'florun-tunnel-token' created."
+          break
+        fi
+        bad "podman could not create the secret."
+        confirm "Try again?" n || break
+      done
+      unset FLORUN_TOKEN
+    else
+      note "Skipped. Create it before the first deploy with:"
+      note "  printf '%s' 'YOUR-TOKEN' | podman secret create florun-tunnel-token -"
+    fi
+  else
+    note "Not set. Create it before the first deploy with:"
+    note "  printf '%s' 'YOUR-TOKEN' | podman secret create florun-tunnel-token -"
+  fi
+else
+  heading "Warning: podman not found"
+  note "The units install fine, but nothing can run until podman is available."
+fi
+
+# ── install units, interpolating what Quadlet cannot ─────────────────
 
 QUADLET_DIR="$HOME/.config/containers/systemd"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 BIN_DIR="$HOME/.local/bin"
 mkdir -p "$QUADLET_DIR" "$SYSTEMD_DIR" "$BIN_DIR"
 
-# ── install units, interpolating what Quadlet cannot ─────────────────
+heading "Installing units"
+
 # %h/florun is the placeholder the shipped units carry; rewrite it to the real
-# webroot. Everything else comes straight from config.florun.
+# webroot. Everything else comes straight from the config above.
 install_unit() {
-  src="$1"; dest="$2"
+  local src="$1" dest="$2"
   sed \
     -e "s|%h/florun|$BASE|g" \
     -e "s|^ContainerName=FloRun$|ContainerName=$STACK_NAME|" \
     -e "s|^ContainerName=cloudflared-tunnel-FloRun$|ContainerName=cloudflared-tunnel-$STACK_NAME|" \
     -e "s|^BuildArg=SUBPATH=.*$|BuildArg=SUBPATH=$SUBPATH|" \
     "$src" > "$dest.tmp"
-  # UIDs are rewritten per-unit below, because website and tunnel differ.
   mv -f "$dest.tmp" "$dest"
-  echo "  installed $dest"
+  note "installed $dest"
 }
 
 install_unit "$SELF_DIR/quadlet/florun-backend.network"  "$QUADLET_DIR/florun-backend.network"
@@ -141,41 +385,96 @@ sed -i.bak -e "s|^User=.*$|User=$TUNNEL_UID|" -e "s|^Group=.*$|Group=$TUNNEL_UID
 
 for u in florun-update.service florun-update.timer; do
   sed -e "s|%h/florun|$BASE|g" "$SELF_DIR/systemd/$u" > "$SYSTEMD_DIR/$u"
-  echo "  installed $SYSTEMD_DIR/$u"
+  note "installed $SYSTEMD_DIR/$u"
 done
 
 install -m 0755 "$SELF_DIR/bin/florun-update.sh" "$BIN_DIR/florun-update.sh"
-echo "  installed $BIN_DIR/florun-update.sh"
+note "installed $BIN_DIR/florun-update.sh"
 
 systemctl --user daemon-reload
-echo
-echo "Units installed and systemd reloaded."
+note "systemd reloaded"
 
-# ── next steps ───────────────────────────────────────────────────────
-cat <<NEXT
+# ── optional finishing steps ─────────────────────────────────────────
+# Each is offered rather than assumed: they change system state beyond dropping
+# files in place, and someone re-running the installer to pick up an edited
+# unit should not have a deploy kicked off underneath them.
 
-Next steps
-----------
-1. Tunnel token (only if you have not created it yet). Use printf, NOT echo --
-   a trailing newline is stored verbatim and cloudflared rejects it:
+LINGER_DONE=0
+FIRST_RUN_DONE=0
+TIMER_DONE=0
 
-     printf '%s' 'YOUR-TUNNEL-TOKEN' | podman secret create florun-tunnel-token -
+if [ "$INTERACTIVE" -eq 1 ]; then
+  heading "Finishing up"
 
-   Point the tunnel's ingress rule at:  http://website:8080
+  if command -v loginctl >/dev/null 2>&1; then
+    if loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q 'Linger=yes'; then
+      note "Lingering already enabled."
+      LINGER_DONE=1
+    elif confirm "Enable lingering so the services run when you are not logged in?" y; then
+      if loginctl enable-linger "$(id -un)" 2>/dev/null; then
+        note "Lingering enabled."; LINGER_DONE=1
+      else
+        bad "Could not enable lingering (it may need sudo):"
+        bad "  sudo loginctl enable-linger $(id -un)"
+      fi
+    fi
+  fi
 
-2. Keep the services running when you are not logged in:
+  if secret_exists; then
+    if confirm "Run the first deploy now (pull, build the image, start everything)?" n; then
+      note "Running florun-update.service -- this builds a container image and may take a few minutes."
+      if systemctl --user start florun-update.service; then
+        note "First deploy finished. Check it with:  journalctl --user -u florun-update -n 40"
+        FIRST_RUN_DONE=1
+      else
+        bad "The first deploy failed. Inspect it with:"
+        bad "  journalctl --user -u florun-update -n 60 --no-pager"
+      fi
+    fi
+  else
+    note "Skipping the first-deploy offer: the tunnel token secret is not set yet."
+  fi
 
-     loginctl enable-linger $(id -un)
+  if confirm "Enable the daily update timer (05:00 with jitter)?" y; then
+    if systemctl --user enable --now florun-update.timer >/dev/null 2>&1; then
+      note "Timer enabled."; TIMER_DONE=1
+    else
+      bad "Could not enable the timer; do it manually:"
+      bad "  systemctl --user enable --now florun-update.timer"
+    fi
+  fi
+fi
 
-3. First deploy (assembles the webroot, builds the image, starts everything):
+# ── what is left to do ───────────────────────────────────────────────
 
-     systemctl --user start florun-update.service
-     journalctl --user -u florun-update -f
+heading "Done"
+remaining=0
+if ! secret_exists 2>/dev/null; then
+  remaining=$((remaining + 1))
+  note "$remaining. Create the tunnel token secret (printf, NOT echo -- a trailing"
+  note "   newline is stored verbatim and cloudflared rejects it):"
+  note "     printf '%s' 'YOUR-TOKEN' | podman secret create florun-tunnel-token -"
+  note "   Point the tunnel's ingress rule at:  http://website:8080"
+fi
+if [ "$LINGER_DONE" -eq 0 ]; then
+  remaining=$((remaining + 1))
+  note "$remaining. Keep the services running when you are not logged in:"
+  note "     loginctl enable-linger $(id -un)"
+fi
+if [ "$FIRST_RUN_DONE" -eq 0 ]; then
+  remaining=$((remaining + 1))
+  note "$remaining. First deploy (assembles the webroot, builds, starts everything):"
+  note "     systemctl --user start florun-update.service"
+  note "     journalctl --user -u florun-update -f"
+fi
+if [ "$TIMER_DONE" -eq 0 ]; then
+  remaining=$((remaining + 1))
+  note "$remaining. Enable the daily refresh:"
+  note "     systemctl --user enable --now florun-update.timer"
+fi
+[ "$remaining" -eq 0 ] && note "Everything is installed, configured and running."
 
-4. Enable the daily refresh:
-
-     systemctl --user enable --now florun-update.timer
-     systemctl --user list-timers florun-update.timer
+cat >&2 <<NEXT
 
 Verify the isolation actually holds -- nginx must have NO route off the host.
 The positive control runs first, so a probe that never ran cannot be mistaken

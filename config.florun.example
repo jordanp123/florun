@@ -1,7 +1,15 @@
-# FloRun deployment configuration -- copy this file to `config.florun` in the
-# WEBROOT (the directory ABOVE the git checkout) and edit.
+# FloRun deployment configuration.
+#
+# You usually do NOT need to copy this file: `deploy/install.sh` asks for these
+# values on a first install and writes config.florun for you (and
+# `--reconfigure` re-runs those questions later). This file is the annotated
+# reference for what each value means -- and the manual path, if you would
+# rather write the config yourself:
 #
 #   cp FloRunWeb/config.florun.example ../config.florun     # from the checkout
+#
+# An existing config.florun is never overwritten by the installer; it is read
+# and validated instead.
 #
 # config.florun is deliberately NOT in the repo (gitignored) so the nightly
 # deploy can never overwrite your edits. It holds NO secrets -- the Cloudflare
@@ -16,14 +24,12 @@
 # HOSTING THIS YOURSELF (fresh server bootstrap)
 #   1. mkdir -p ~/florun && cd ~/florun
 #   2. git clone https://github.com/jordanp123/florun.git FloRunWeb
-#   3. cp FloRunWeb/config.florun.example config.florun     # edit the values
-#   4. Create the tunnel secret (printf, NOT echo -- a trailing newline
-#      corrupts the token):
-#        printf '%s' 'YOUR-TUNNEL-TOKEN' | podman secret create florun-tunnel-token -
-#      Make a tunnel in the Cloudflare Zero Trust dashboard and route your
-#      hostname to  http://website:8080
-#   5. ./FloRunWeb/deploy/install.sh
-#   6. Follow the "Next steps" it prints.
+#   3. ./FloRunWeb/deploy/install.sh
+#
+#   The installer asks for the values below, offers to store the Cloudflare
+#   tunnel token as a podman secret, and prints whatever is left to do. Make
+#   the tunnel in the Cloudflare Zero Trust dashboard first and route your
+#   hostname to  http://website:8080
 # ---------------------------------------------------------------------------
 
 # Where `git clone` pulls the site from. Used only when the checkout below does

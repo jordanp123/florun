@@ -88,23 +88,70 @@ generic names would collide with another project's units on the same host.
 ## Install
 
 ```sh
-# 1. Webroot: holds config.florun and (after the first update) the assembled
-#    site. The git checkout lives inside it.
+# The webroot holds config.florun and (after the first update) the assembled
+# site. The git checkout lives inside it.
 mkdir -p ~/florun && cd ~/florun
 git clone https://github.com/jordanp123/florun.git FloRunWeb
-cp FloRunWeb/config.florun.example config.florun    # edit if you want non-stock values
-
-# 2. Install the units, timer and updater
 ./FloRunWeb/deploy/install.sh
 ```
 
-Then follow the **Next steps** it prints: create the tunnel-token secret, enable
-lingering, run the updater once (it assembles the webroot, builds and starts
-everything), and enable the timer.
+That is the whole install. There is no config file to copy and edit first —
+`install.sh` asks for the values it needs and writes `config.florun` for you:
+
+```
+FloRun installer
+  Webroot:  /home/florun/florun
+  Checkout: /home/florun/florun/FloRunWeb
+  Install for this webroot? [Y/n]
+
+Setting up config.florun
+  No config.florun yet, so let's create one.
+  Press Enter to accept the value shown in brackets.
+
+  Git repository URL [https://github.com/jordanp123/florun.git]:
+  Checkout directory name (under the webroot) [FloRunWeb]:
+  Stack name (container name prefix) [FloRun]:
+  UID for the nginx container [17011]:
+  UID for the tunnel container [17010]:
+  URL subpath, or '.' for the domain root [.]:
+```
+
+Every answer is validated as you type it, with the same rules the updater
+enforces at 05:00 — a non-numeric UID, a root UID, a UID at or above the user
+namespace size, a subpath containing `..`, two containers sharing a UID. Bad
+input is rejected on the spot with the reason and re-asked, rather than
+accepted and blowing up on a morning you are not watching.
+
+It then offers the finishing steps, each as a separate question so nothing
+happens behind your back:
+
+- **the tunnel token** — read with the terminal echo off, and piped to
+  `podman secret create` through `printf` so no trailing newline can reach it.
+  It never touches a file, this repo, or your shell history.
+- **lingering**, so the services keep running when you log out
+- **the first deploy** (only offered once the token secret exists)
+- **the daily update timer**
+
+Decline any of them and the closing summary lists exactly what is left, with
+the command to run.
 
 `install.sh` is safe to re-run — after editing a unit, pulling a new version, or
-moving the webroot. Flags: `--yes` to accept the detected webroot, `--base-dir
-PATH` (or `FLORUN_BASE=PATH`) to point elsewhere, `--help` for usage.
+moving the webroot. A second run does **not** re-interrogate you: an existing
+`config.florun` is read and validated, not replaced.
+
+| Flag | Effect |
+| --- | --- |
+| `--yes`, `-y` | Non-interactive: accept the detected webroot, take every default, never prompt, never touch a secret, never start anything. |
+| `--reconfigure` | Re-run the questions even though `config.florun` exists; your current values become the defaults. |
+| `--base-dir PATH` | Install for a webroot other than the checkout's parent (or set `FLORUN_BASE=PATH`). |
+| `--help`, `-h` | Usage. |
+
+It also drops to non-interactive automatically when stdin is not a terminal, so
+running it from a script, CI or a systemd unit can never hang on a prompt.
+
+`config.florun.example` is still shipped as the annotated reference for what
+each value means, and you can copy and edit it by hand if you prefer — the
+installer will use it as-is and skip its own questions.
 
 **It does the interpolation Quadlet can't.** Quadlet files are systemd units, so
 they don't expand `${VAR}`. `install.sh` reads your `config.florun` once and
