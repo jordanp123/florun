@@ -1,15 +1,153 @@
-# Deployment-local, never committed: config.florun holds this host's UIDs,
-# names and repo URL, and lives in the WEBROOT (above the checkout) so a pull
-# can never overwrite it. Listed here so an accidental copy inside the checkout
-# is not committed either.
+# ─────────────────────────────────────────────────────────────────────
+# Secrets and credentials
+#
+# This repository is PUBLIC. The deployment is designed so that no secret
+# ever needs to live in a file here -- the Cloudflare tunnel token is held
+# in a podman secret and injected as an env var at container start. These
+# patterns are the backstop for the ways one turns up anyway: a .env copied
+# from another stack (the Docker Compose flavour of this deployment used
+# exactly that), a cloudflared credentials file, a stray key parked here.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*.keystore
+*.jks
+*.ppk
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+.netrc
+_netrc
+.npmrc
+.pypirc
+.htpasswd
+credentials.json
+*credentials.json
+secrets.*
+*.secret
+
+# Deployment-local configuration. config.florun carries this host's UIDs,
+# stack name and repo URL, and belongs in the WEBROOT (above the checkout)
+# so a pull can never overwrite it -- this entry stops an accidental copy
+# inside the checkout from being committed. The .example IS tracked, hence
+# the negation.
 config.florun
+config.florun.local
+!config.florun.example
+
+# Updater output. Names host paths, deploy times, commit and image ids:
+# noise in review, and more detail about the server than a public repo
+# needs to carry.
+*.log
 update.log
-update.log.1
+update.log.*
 
+# ─────────────────────────────────────────────────────────────────────
+# Field data
+#
+# The whole point of the app is that measurements stay on the device.
+# Exports cross that boundary by design -- one PDF carries GPS coordinates,
+# the site label, free-text notes and an embedded photo -- so if a file gets
+# saved into the project directory it must not follow anyone into a public
+# repo. These match the filenames export.js actually writes.
+FloRun-*.pdf
+FloRun-*.csv
+FloRun-History-*.pdf
+FloRun-History-*.csv
+history.json
+history.corrupted-*.json
+photos/
+*.heic
+*.HEIC
+
+# ─────────────────────────────────────────────────────────────────────
 # macOS
+#
+# This project lives on an external volume, where the OS scatters rather
+# more of these than usual -- the volume root already carries
+# .Spotlight-V100, .fseventsd, .TemporaryItems and friends.
 .DS_Store
+.DS_Store?
+._*
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.fseventsd
+.DocumentRevisions-V100
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
 
-# Editor
-*.swp
-*~
+# Windows / Linux, for anyone else who checks this out
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+.directory
+.Trash-*
+.nfs*
+
+# ─────────────────────────────────────────────────────────────────────
+# Editors, IDEs and agent tooling
 .vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+.*.sw?
+*~
+*.sublime-workspace
+*.sublime-project
+.zed/
+.history/
+.claude/
+launch.json
+
+# Merge, patch and backup leftovers
+*.orig
+*.rej
+*.bak
+*.tmp
+*.temp
+
+# ─────────────────────────────────────────────────────────────────────
+# Tooling artefacts
+#
+# The app has no build step and no dependencies, so none of this should
+# ever exist here -- but a stray command still creates it, and an
+# accidental `npm install` would otherwise offer thousands of files up for
+# staging.
+node_modules/
+bower_components/
+.npm/
+.yarn/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.Python
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Archives -- almost always a backup of the webroot, which would carry
+# config.florun and update.log inside it.
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
