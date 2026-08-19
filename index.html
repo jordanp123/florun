@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <!--
+    Strict Content-Security-Policy. The app loads NOTHING from the network: no
+    CDNs, no fonts, no analytics, and it ships zero fetch/XHR code. Every script
+    and style is same-origin; there is no inline script, no eval, and no inline
+    event handlers (all wiring is addEventListener in js/ui.js).
+
+    blob: appears in img-src because captured photos are held as Blobs in
+    IndexedDB and displayed through object URLs. It is NOT in script-src --
+    a blob: script is exactly the injection vector this policy exists to stop.
+
+    worker-src covers the service worker; manifest-src covers the web app
+    manifest. connect-src 'self' lets the service worker revalidate its own
+    precached assets and nothing else.
+
+    When served by nginx the header version of this policy also applies, and
+    browsers enforce the INTERSECTION -- so the hosted policy is the stricter
+    of the two. This meta tag is what protects a file:// or bare-static copy.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'none';
+    script-src 'self';
+    style-src 'self';
+    img-src 'self' data: blob:;
+    font-src 'self';
+    connect-src 'self';
+    worker-src 'self';
+    manifest-src 'self';
+    object-src 'none';
+    child-src 'none';
+    base-uri 'none';
+    form-action 'none';
+    frame-ancestors 'none';
+  " />
+  <meta name="referrer" content="no-referrer" />
+  <meta name="description" content="Field flow-rate calculator: timed volume, calibrated bucket and V-notch weir readings, with PDF and CSV export. Works offline." />
+  <meta name="theme-color" content="#d2691e" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="FloRun" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>FloRun — Field Flow Rate Calculator</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+
+<!-- ── First-run disclaimer ─────────────────────────────────────────── -->
+<div class="overlay" id="disclaimer" role="dialog" aria-modal="true" aria-labelledby="disclaimerTitle" hidden>
+  <div class="overlay-scroll">
+    <div class="overlay-inner">
+      <div class="drop" aria-hidden="true"></div>
+      <h1 id="disclaimerTitle">Welcome to FloRun</h1>
+      <p class="subtle center">Important — please read before use</p>
+      <p>FloRun is intended as an <strong>assistance aid</strong> for estimating flow rates from
+        timed volume measurements, calibrated bucket readings, triangular notch weir charts, and
+        manually entered values.</p>
+      <p class="lead">Please be aware:</p>
+      <ul class="bullets">
+        <li>Results are estimates only and may contain errors arising from chart interpolation,
+          transcription, input precision, device timing, or other factors.</li>
+        <li>This app does <strong>not</strong> guarantee the accuracy of any measurement or calculation.</li>
+        <li>FloRun is provided "<strong>AS IS</strong>" without warranty of any kind, express or
+          implied — including but not limited to warranties of merchantability, fitness for a
+          particular purpose, or non-infringement.</li>
+        <li>The user assumes all risk and responsibility for use of this app and its outputs.</li>
+        <li>For regulatory reporting, compliance documentation, or any critical decisions, always
+          verify results with calibrated instruments and qualified personnel.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="overlay-footer">
+    <button type="button" class="btn btn-primary btn-block" id="acknowledgeBtn">I Understand</button>
+    <p class="tiny center subtle">By tapping "I Understand" you acknowledge these terms.</p>
+  </div>
+</div>
+
+<!-- ── App ──────────────────────────────────────────────────────────── -->
+<div class="app" id="app" hidden>
+
+  <header class="topbar">
+    <h1 class="brand"><span class="drop small" aria-hidden="true"></span> FloRun</h1>
+    <button type="button" class="icon-btn" id="aboutBtn" aria-label="About and storage information">?</button>
+  </header>
+
+  <main>
+
+    <!-- Measure -->
+    <section class="view" id="view-measure" aria-label="Measure">
+
+      <div class="notice" id="pruneNotice" hidden>
+        <span class="notice-icon" aria-hidden="true">⛁</span>
+        <div>
+          <strong>History limit reached</strong>
+          <p>Oldest measurement was removed (25-record cap). Export to PDF or CSV to keep older records.</p>
+        </div>
+      </div>
+
+      <div class="seg" id="modeTabs" role="tablist" aria-label="Measurement method">
+        <button type="button" role="tab" data-mode="timedVolume" class="seg-on">Timed Volume</button>
+        <button type="button" role="tab" data-mode="weir">V-Notch Weir</button>
+        <button type="button" role="tab" data-mode="manualEntry">Manual Entry</button>
+      </div>
+
+      <button type="button" class="running-pill" id="runningPill" hidden>
+        <span class="pill-icon" aria-hidden="true">⏱</span>
+        <span id="runningPillText">Timer running</span>
+        <span class="pill-more">Switch back ›</span>
+      </button>
+
+      <!-- Timed volume -->
+      <div class="pane" id="pane-timedVolume">
+        <div class="stopwatch" id="stopwatchDisplay" aria-live="off">00:00.00</div>
+        <button type="button" class="btn btn-block btn-start" id="stopwatchBtn">Start</button>
+
+        <div class="field">
+          <div class="field-head">
+            <label for="volumeInput" id="volumeLabel">Volume Captured</label>
+            <span class="subtle tiny" id="volumeHint" hidden>Standard 5-gal bucket</span>
+          </div>
+          <div class="row">
+            <input type="text" inputmode="decimal" autocomplete="off" id="volumeInput" placeholder="0.00" />
+            <select id="unitSelect" aria-label="Volume unit"></select>
+          </div>
+          <p class="warn" id="volumeWarning" hidden></p>
+          <p class="hint" id="bucketNote" hidden>
+            <span aria-hidden="true">ⓘ</span>
+            Reference chart represents a generic 5-gallon bucket. Verify against your specific
+            bucket if precision matters.
+          </p>
+        </div>
+      </div>
+
+      <!-- Weir -->
+      <div class="pane" id="pane-weir" hidden>
+        <div class="field">
+          <label id="notchLabel">Notch Angle</label>
+          <div class="seg" id="weirTabs" role="tablist" aria-labelledby="notchLabel">
+            <button type="button" role="tab" data-weir="v90" class="seg-on">90°</button>
+            <button type="button" role="tab" data-weir="v60">60°</button>
+          </div>
+        </div>
+        <div class="field">
+          <div class="field-head">
+            <label for="headInput">Head Height</label>
+            <span class="subtle tiny">Triangular notch, end-contracted</span>
+          </div>
+          <div class="row">
+            <input type="text" inputmode="decimal" autocomplete="off" id="headInput" placeholder="Inches" />
+            <span class="suffix">in</span>
+          </div>
+          <p class="warn" id="headWarning" hidden></p>
+        </div>
+      </div>
+
+      <!-- Manual -->
+      <div class="pane" id="pane-manualEntry" hidden>
+        <div class="field">
+          <div class="field-head">
+            <label for="manualInput">Manual Flow Rate</label>
+            <span class="subtle tiny">Direct GPM entry</span>
+          </div>
+          <div class="row">
+            <input type="text" inputmode="decimal" autocomplete="off" id="manualInput" placeholder="Gallons per minute" />
+            <span class="suffix">GPM</span>
+          </div>
+          <p class="warn" id="manualWarning" hidden></p>
+          <p class="hint">
+            <span aria-hidden="true">ⓘ</span>
+            Enter a GPM value measured by another instrument or transcribed from an existing
+            record. The app converts to GPH and GPD. Enter 0 to log a stopped flow.
+          </p>
+        </div>
+      </div>
+
+      <div class="card result" id="resultCard">
+        <div class="result-row">
+          <div><span class="abbr">GPM</span><span class="full">Gallons Per Minute</span></div>
+          <span class="value" id="valGPM">—</span>
+        </div>
+        <div class="result-row">
+          <div><span class="abbr">GPH</span><span class="full">Gallons Per Hour</span></div>
+          <span class="value" id="valGPH">—</span>
+        </div>
+        <div class="result-row">
+          <div><span class="abbr">GPD</span><span class="full">Gallons Per Day</span></div>
+          <span class="value" id="valGPD">—</span>
+        </div>
+        <p class="aid" id="aidFooter" hidden>
+          <span aria-hidden="true">ⓘ</span> Calculation aid only — verify critical readings independently.
+        </p>
+      </div>
+
+      <div class="actions">
+        <button type="button" class="btn btn-primary btn-block" id="saveBtn" disabled>Save Measurement</button>
+        <button type="button" class="btn btn-block" id="exportBtn" disabled>Export PDF</button>
+        <button type="button" class="btn btn-quiet btn-block" id="clearBtn" hidden>Clear</button>
+      </div>
+    </section>
+
+    <!-- History -->
+    <section class="view" id="view-history" aria-label="History" hidden>
+      <div class="list-head">
+        <h2>History</h2>
+        <div class="menu-wrap">
+          <button type="button" class="btn btn-small" id="exportAllBtn" aria-haspopup="true" aria-expanded="false" disabled>Export All ▾</button>
+          <div class="menu" id="exportMenu" role="menu" hidden>
+            <button type="button" role="menuitem" id="exportAllPdf">Export as PDF</button>
+            <button type="button" role="menuitem" id="exportAllCsv">Export as CSV</button>
+          </div>
+        </div>
+      </div>
+      <p class="subtle tiny" id="historyCount"></p>
+      <ul class="list" id="historyList"></ul>
+      <div class="empty" id="historyEmpty" hidden>
+        <div class="drop small" aria-hidden="true"></div>
+        <h3>No Measurements Yet</h3>
+        <p class="subtle">Take a reading and tap Save to start a history.</p>
+      </div>
+    </section>
+
+    <!-- Detail -->
+    <section class="view" id="view-detail" aria-label="Measurement detail" hidden>
+      <button type="button" class="btn btn-quiet btn-back" id="detailBack">‹ History</button>
+      <h2 id="detailTitle">Measurement</h2>
+      <div id="detailFields"></div>
+      <div class="field">
+        <label for="detailSite">Site label</label>
+        <input type="text" id="detailSite" autocomplete="off" placeholder="e.g. Outfall 3 — North Pond" />
+      </div>
+      <div class="field">
+        <label for="detailNotes">Notes</label>
+        <textarea id="detailNotes" rows="3" placeholder="Conditions, method, anything worth remembering"></textarea>
+      </div>
+      <div class="photo-wrap" id="detailPhotoWrap" hidden>
+        <label>Photo</label>
+        <img id="detailPhoto" alt="Photo attached to this measurement" />
+      </div>
+      <div class="actions">
+        <button type="button" class="btn btn-primary btn-block" id="detailExport">Export PDF</button>
+        <button type="button" class="btn btn-danger btn-block" id="detailDelete">Delete Measurement</button>
+      </div>
+    </section>
+
+  </main>
+
+  <nav class="tabbar" aria-label="Sections">
+    <button type="button" data-view="measure" class="tab-on" id="tabMeasure">
+      <span class="tab-icon" aria-hidden="true">⏱</span><span>Measure</span>
+    </button>
+    <button type="button" data-view="history" id="tabHistory">
+      <span class="tab-icon" aria-hidden="true">▤</span><span>History</span>
+    </button>
+  </nav>
+</div>
+
+<!-- ── Save sheet ───────────────────────────────────────────────────── -->
+<div class="overlay sheet" id="saveSheet" role="dialog" aria-modal="true" aria-labelledby="saveTitle" hidden>
+  <div class="sheet-head">
+    <button type="button" class="btn btn-quiet btn-small" id="saveCancel">Cancel</button>
+    <h2 id="saveTitle">Save Measurement</h2>
+    <button type="button" class="btn btn-small btn-primary" id="saveConfirm">Save</button>
+  </div>
+  <div class="overlay-scroll">
+    <div class="overlay-inner">
+      <h3 class="section">Measurement</h3>
+      <div id="saveSummary" class="kv"></div>
+
+      <h3 class="section">Site (optional)</h3>
+      <div class="field">
+        <input type="text" id="saveSite" autocomplete="off" placeholder="e.g. Outfall 3 — North Pond" />
+      </div>
+      <div class="field">
+        <textarea id="saveNotes" rows="3" placeholder="Notes"></textarea>
+      </div>
+
+      <h3 class="section">Photo (optional)</h3>
+      <div class="field" id="photoField">
+        <!-- capture="environment" opens the rear camera directly on mobile and
+             degrades to a file picker on desktop. -->
+        <input type="file" accept="image/*" capture="environment" id="photoInput" class="visually-hidden" />
+        <button type="button" class="btn btn-block" id="photoBtn">Take Photo</button>
+        <div class="photo-preview" id="photoPreview" hidden>
+          <img id="photoImg" alt="Captured photo preview" />
+          <div class="row-between">
+            <button type="button" class="btn btn-small" id="photoRetake">Retake</button>
+            <button type="button" class="btn btn-small btn-danger-quiet" id="photoRemove">Remove</button>
+          </div>
+        </div>
+        <p class="warn" id="photoError" hidden></p>
+      </div>
+
+      <h3 class="section">Location</h3>
+      <p class="hint" id="locationStatus"><span aria-hidden="true">◎</span> Will be captured on Save</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── About sheet ──────────────────────────────────────────────────── -->
+<div class="overlay sheet" id="aboutSheet" role="dialog" aria-modal="true" aria-labelledby="aboutTitle" hidden>
+  <div class="sheet-head">
+    <button type="button" class="btn btn-quiet btn-small" id="aboutClose">Close</button>
+    <h2 id="aboutTitle">About FloRun</h2>
+    <span class="spacer"></span>
+  </div>
+  <div class="overlay-scroll">
+    <div class="overlay-inner">
+      <p>FloRun estimates flow rates from timed volume captures, calibrated 5-gallon bucket
+        readings, triangular V-notch weir charts, and manually entered values.</p>
+
+      <h3 class="section">Your data</h3>
+      <p>Everything stays on this device. FloRun makes no network requests, uses no analytics,
+        and works fully offline. The last <strong>25</strong> measurements are kept; saving a
+        26th removes the oldest.</p>
+      <p id="storageStatus" class="subtle tiny"></p>
+
+      <div class="notice inline" id="persistWarning" hidden>
+        <span class="notice-icon" aria-hidden="true">!</span>
+        <div>
+          <strong>Add to Home Screen to keep your data</strong>
+          <p>Browsers may clear storage for sites that are not installed and go unused for a
+            while. Installing FloRun to your Home Screen — and exporting anything you need to
+            keep — protects your measurements.</p>
+        </div>
+      </div>
+
+      <h3 class="section">Assistance aid only</h3>
+      <p>Results are estimates and may contain errors from chart interpolation, transcription,
+        input precision, or device timing. Provided "AS IS" without warranty of any kind. For
+        regulatory reporting or any critical decision, verify with calibrated instruments and
+        qualified personnel.</p>
+
+      <h3 class="section">V-notch weir setup</h3>
+      <p>The weir tables assume a correctly installed weir: sharp crest, free discharge below the
+        notch, head measured three to four times the maximum head <em>upstream</em>, an adequate
+        approach pool, end contractions, and a level crest. If your installation does not meet
+        these conditions, treat readings as rough estimates only.</p>
+
+      <p class="tiny subtle" id="versionLine"></p>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="js/format.js" defer></script>
+<script src="js/bucket-chart.js" defer></script>
+<script src="js/weir-chart.js" defer></script>
+<script src="js/core.js" defer></script>
+<script src="js/csv.js" defer></script>
+<script src="js/pdf.js" defer></script>
+<script src="js/store.js" defer></script>
+<script src="js/photos.js" defer></script>
+<script src="js/geo.js" defer></script>
+<script src="js/stopwatch.js" defer></script>
+<script src="js/export.js" defer></script>
+<script src="js/ui.js" defer></script>
+</body>
+</html>

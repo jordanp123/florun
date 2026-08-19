@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""
+deploy_check.py -- deployment invariants.
+
+WebSWR keeps two deployments honest with a parity test. FloRun ships only the
+Podman path, so instead this asserts the properties that make that deployment
+what it claims to be, and the couplings that are easy to break silently:
+
+  * nginx genuinely has no route off the host (internal network, joined alone)
+  * the hardening flags are actually present on both containers
+  * the service-worker precache list matches the files that exist AND the
+    scripts index.html loads -- a precache 404 makes install fail atomically,
+    which would strand every user on the previous build
+  * the /sw.js nginx location repeats every server-level security header,
+    because a location-level add_header REPLACES the inherited set
+  * the Dockerfile ships everything the precache expects
+
+Exits non-zero with a readable list of failures. No dependencies.
+"""
+
+import os
+import re
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+failures = []
+checks = 0
+
+
+def check(label, ok, detail=""):
+    global checks
+    checks += 1
+    if not ok:
+        failures.append(label + (": " + detail if detail else ""))
+
+
+def read(*parts):
+    path = os.path.join(ROOT, *parts)
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as fh:
+        return fh.read()
+
+
+# ── files exist ──────────────────────────────────────────────────────
+
+REQUIRED = [
+    "index.html", "manifest.webmanifest", "sw.js", "Dockerfile", "nginx.conf",
+    ".dockerignore", "config.florun.example",
+    "deploy/install.sh", "deploy/bin/florun-update.sh",
+    "deploy/quadlet/florun-backend.network",
+    "deploy/quadlet/florun-egress.network",
+    "deploy/quadlet/florun-website.build",
+    "deploy/quadlet/florun-website.container",
+    "deploy/quadlet/florun-cloudflared.container",
+    "deploy/systemd/florun-update.service",
+    "deploy/systemd/florun-update.timer",
+]
+for rel in REQUIRED:
+    check("required file present: " + rel, read(*rel.split("/")) is not None)
+
+website = read("deploy", "quadlet", "florun-website.container") or ""
+tunnel = read("deploy", "quadlet", "florun-cloudflared.container") or ""
+backend = read("deploy", "quadlet", "florun-backend.network") or ""
+egress = read("deploy", "quadlet", "florun-egress.network") or ""
+build = read("deploy", "quadlet", "florun-website.build") or ""
+nginx = read("nginx.conf") or ""
+dockerfile = read("Dockerfile") or ""
+swjs = read("sw.js") or ""
+html = read("index.html") or ""
+example = read("config.florun.example") or ""
+updater = read("deploy", "bin", "florun-update.sh") or ""
+
+# ── isolation: nginx must have no way out ────────────────────────────
+
+check("backend network is internal", "Internal=true" in backend)
+check("egress network is NOT internal", "Internal=true" not in egress)
+check("website joins the backend network", "Network=florun-backend.network" in website)
+check("website does NOT join egress (this is the whole isolation claim)",
+      "florun-egress" not in website)
+check("tunnel joins backend", "Network=florun-backend.network" in tunnel)
+check("tunnel joins egress", "Network=florun-egress.network" in tunnel)
+
+# No published ports anywhere: the tunnel dials out, nothing listens publicly.
+for name, text in (("website", website), ("tunnel", tunnel)):
+    check(name + " publishes no ports",
+          "PublishPort" not in text and "-p " not in text)
+
+# ── hardening, both containers ───────────────────────────────────────
+
+for name, text in (("website", website), ("tunnel", tunnel)):
+    check(name + " read-only rootfs", "ReadOnly=true" in text)
+    check(name + " no-new-privileges", "NoNewPrivileges=true" in text)
+    check(name + " drops all capabilities", "DropCapability=ALL" in text)
+    check(name + " uses a private user namespace", "UserNS=auto:size=" in text)
+    check(name + " runs as a non-root user",
+          bool(re.search(r"^User=[1-9]\d*$", text, re.M)))
+    check(name + " has a memory limit", "--memory=" in text)
+    check(name + " has a pids limit", "--pids-limit=" in text)
+
+# The read-only rootfs means nginx needs tmpfs for everything it writes.
+for path in ("/tmp", "/run", "/var/cache/nginx"):
+    check("website has tmpfs for " + path, "Tmpfs=" + path + ":" in website)
+
+# The tunnel token must come from a podman secret, never a file or a literal.
+check("tunnel token comes from a podman secret",
+      "Secret=florun-tunnel-token,type=env,target=TUNNEL_TOKEN" in tunnel)
+check("no tunnel token literal in any unit",
+      "TUNNEL_TOKEN=" not in website and
+      not re.search(r"Environment=.*TUNNEL_TOKEN=\S", tunnel))
+
+# Distinct UIDs: one compromised container must not be able to touch the other.
+app_uid = re.search(r"^APP_UID=(\d+)$", example, re.M)
+tun_uid = re.search(r"^TUNNEL_UID=(\d+)$", example, re.M)
+check("config example sets APP_UID", app_uid is not None)
+check("config example sets TUNNEL_UID", tun_uid is not None)
+if app_uid and tun_uid:
+    a, t = int(app_uid.group(1)), int(tun_uid.group(1))
+    check("APP_UID and TUNNEL_UID differ", a != t, "%d vs %d" % (a, t))
+    check("APP_UID is not root", a != 0)
+    check("TUNNEL_UID is not root", t != 0)
+    # A UID at or above the namespace size has nowhere to map and cannot start.
+    size = re.search(r"UserNS=auto:size=(\d+)", website)
+    if size:
+        limit = int(size.group(1))
+        check("APP_UID below the UserNS size", a < limit, "%d >= %d" % (a, limit))
+        check("TUNNEL_UID below the UserNS size", t < limit, "%d >= %d" % (t, limit))
+
+# ── updater safety ───────────────────────────────────────────────────
+
+check("updater refuses to run as root", 'id -u' in updater and "must not run as root" in updater)
+check("updater parses config as data, never sources it",
+      "sed -n" in updater and not re.search(r"^\s*(\.|source)\s+\S*config\.florun", updater, re.M))
+check("updater validates SUBPATH", "SUBPATH must be a plain path segment" in updater)
+check("updater rolls back a failed rollout", "rolling back to the previous image" in updater)
+check("updater pulls the base image (CVE freshness)", "--pull" in updater)
+check("updater prunes only after the new container is up",
+      updater.index("podman system prune") > updater.index("is-active"))
+check("updater rotates its own log", "update.log.1" in updater or 'mv -f "$LOG"' in updater)
+
+# ── service worker precache ──────────────────────────────────────────
+
+precache = re.search(r"const PRECACHE = \[(.*?)\];", swjs, re.S)
+check("sw.js declares a precache list", precache is not None)
+check("sw.js has a versioned cache name",
+      bool(re.search(r'CACHE\s*=\s*"florun-v\d+"', swjs)))
+
+if precache:
+    entries = re.findall(r'"([^"]+)"', precache.group(1))
+    # Every precached asset must exist: cache.addAll is atomic, so one 404
+    # fails the whole install and no update ever lands.
+    for entry in entries:
+        if entry in ("./",):
+            continue
+        check("precached asset exists on disk: " + entry,
+              os.path.exists(os.path.join(ROOT, entry)))
+
+    # Every script index.html loads must be precached, or the app breaks
+    # offline in a way that only shows up in the field.
+    for src in re.findall(r'<script src="([^"]+)"', html):
+        check("index.html script is precached: " + src, src in entries)
+
+    # And everything precached must actually ship in the image.
+    for entry in entries:
+        if entry in ("./", "index.html", "manifest.webmanifest", "sw.js"):
+            continue
+        top = entry.split("/")[0]
+        check("Dockerfile ships " + top + "/ (for " + entry + ")",
+              top + "/" in dockerfile)
+
+check("Dockerfile copies index.html", "index.html" in dockerfile)
+check("Dockerfile copies the manifest", "manifest.webmanifest" in dockerfile)
+check("Dockerfile copies the service worker", "sw.js" in dockerfile)
+check("Dockerfile copies nginx.conf", "nginx.conf" in dockerfile)
+
+# ── nginx ────────────────────────────────────────────────────────────
+
+check("nginx listens on 8080 (unprivileged)", "listen 8080;" in nginx)
+check("nginx allows only GET and HEAD", "if ($request_method !~ ^(GET|HEAD)$)" in nginx)
+check("nginx disables absolute redirects", "absolute_redirect off;" in nginx)
+check("nginx resolves index inline (no trailing-slash redirect loop)",
+      "try_files $uri $uri/index.html" in nginx)
+check("nginx hides its version", "server_tokens off;" in nginx)
+check("nginx blocks dotfiles", re.search(r"location ~ /\\\.", nginx) is not None)
+check("manifest is served as application/manifest+json",
+      "application/manifest+json" in nginx)
+check("service worker is uncacheable", 'add_header Cache-Control "no-cache"' in nginx)
+check("Service-Worker-Allowed is set", "Service-Worker-Allowed" in nginx)
+
+# The trap this exists for: a location-level add_header REPLACES the inherited
+# set. Every security header on the server block must be repeated inside the
+# /sw.js location, or the most sensitive file in the app ships without them.
+server_headers = set()
+sw_headers = set()
+in_sw = False
+depth = 0
+for line in nginx.splitlines():
+    stripped = line.strip()
+    if stripped.startswith("location = /sw.js"):
+        in_sw = True
+        depth = 0
+    if in_sw:
+        depth += line.count("{") - line.count("}")
+        m = re.match(r"add_header\s+(\S+)", stripped)
+        if m:
+            sw_headers.add(m.group(1))
+        if depth <= 0 and "}" in line:
+            in_sw = False
+    else:
+        m = re.match(r"add_header\s+(\S+)", stripped)
+        if m:
+            server_headers.add(m.group(1))
+
+security_headers = {
+    "Content-Security-Policy", "X-Content-Type-Options", "Referrer-Policy",
+    "Cross-Origin-Opener-Policy", "Strict-Transport-Security", "Permissions-Policy",
+}
+for header in sorted(security_headers & server_headers):
+    check("/sw.js location repeats " + header + " (add_header replaces, not appends)",
+          header in sw_headers)
+
+# ── CSP ──────────────────────────────────────────────────────────────
+
+csp = re.search(r'add_header Content-Security-Policy "([^"]+)"', nginx)
+check("nginx sets a CSP", csp is not None)
+if csp:
+    policy = csp.group(1)
+    check("CSP default-src is 'none'", "default-src 'none'" in policy)
+    check("CSP forbids inline script", "'unsafe-inline'" not in policy.split("style-src")[0])
+    check("CSP forbids eval", "'unsafe-eval'" not in policy)
+    check("CSP blocks framing", "frame-ancestors 'none'" in policy)
+    check("CSP allows the service worker", "worker-src 'self'" in policy)
+    check("CSP allows the manifest", "manifest-src 'self'" in policy)
+    # Photos are Blobs shown through object URLs, so blob: belongs in img-src.
+    img = re.search(r"img-src ([^;]+)", policy)
+    check("CSP allows blob: images (captured photos)", img is not None and "blob:" in img.group(1))
+    # ...and must NOT be script-executable.
+    script = re.search(r"script-src ([^;]+)", policy)
+    check("CSP does NOT allow blob: scripts",
+          script is not None and "blob:" not in script.group(1))
+
+# The app must ship no inline scripts or handlers, or the CSP above breaks it.
+check("index.html has no inline <script> body",
+      not re.search(r"<script(?![^>]*\ssrc=)[^>]*>\s*\S", html))
+check("index.html has no inline event handlers",
+      not re.search(r"<[^>]+\son(click|load|change|input|submit)\s*=", html, re.I))
+
+# ── CSS invariant ────────────────────────────────────────────────────
+# Every sheet, notice and menu is toggled with the hidden attribute, but the
+# UA's `[hidden] { display: none }` is a bare attribute selector that ANY class
+# rule setting display outranks. Without an explicit override every overlay
+# renders at once -- which is exactly what happened the first time this app was
+# opened in a browser.
+css = read("css", "styles.css") or ""
+check("css forces [hidden] to win over class display rules",
+      bool(re.search(r"\[hidden\]\s*\{[^}]*display:\s*none\s*!important", css)))
+# Anything the UI toggles via `hidden` must therefore be listed here as proof
+# the override is actually needed, not decorative.
+for cls in (".overlay", ".notice", ".running-pill", ".menu"):
+    check("css sets display on " + cls + " (so the [hidden] override matters)",
+          bool(re.search(re.escape(cls) + r"[^{]*\{[^}]*display:", css)))
+
+# ── report ───────────────────────────────────────────────────────────
+
+if failures:
+    print("  %d checks, %d FAILED" % (checks, len(failures)))
+    for f in failures:
+        print("  FAIL: " + f)
+    sys.exit(1)
+
+print("  %d checks passed" % checks)
+sys.exit(0)

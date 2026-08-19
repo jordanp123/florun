@@ -1,0 +1,15 @@
+# Deployment-local, never committed: config.florun holds this host's UIDs,
+# names and repo URL, and lives in the WEBROOT (above the checkout) so a pull
+# can never overwrite it. Listed here so an accidental copy inside the checkout
+# is not committed either.
+config.florun
+update.log
+update.log.1
+
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+*~
+.vscode/

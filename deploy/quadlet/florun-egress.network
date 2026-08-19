@@ -1,0 +1,7 @@
+# Outbound network. ONLY the cloudflared container joins this one, so the
+# tunnel can reach the Cloudflare edge while nginx stays sealed off.
+[Unit]
+Description=FloRun egress network (tunnel only)
+
+[Network]
+NetworkName=florun-egress

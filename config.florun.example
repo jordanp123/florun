@@ -1,0 +1,63 @@
+# FloRun deployment configuration -- copy this file to `config.florun` in the
+# WEBROOT (the directory ABOVE the git checkout) and edit.
+#
+#   cp FloRunWeb/config.florun.example ../config.florun     # from the checkout
+#
+# config.florun is deliberately NOT in the repo (gitignored) so the nightly
+# deploy can never overwrite your edits. It holds NO secrets -- the Cloudflare
+# tunnel token lives in a podman secret, never in a file in this directory.
+#
+# Format: plain KEY=value, no spaces around `=`, no quotes. The updater parses
+# this file as DATA (it is never executed), validates every value against the
+# character sets noted below, and aborts loudly -- with the running site
+# untouched -- on anything suspicious.
+#
+# ---------------------------------------------------------------------------
+# HOSTING THIS YOURSELF (fresh server bootstrap)
+#   1. mkdir -p ~/florun && cd ~/florun
+#   2. git clone https://github.com/jordanp123/florun.git FloRunWeb
+#   3. cp FloRunWeb/config.florun.example config.florun     # edit the values
+#   4. Create the tunnel secret (printf, NOT echo -- a trailing newline
+#      corrupts the token):
+#        printf '%s' 'YOUR-TUNNEL-TOKEN' | podman secret create florun-tunnel-token -
+#      Make a tunnel in the Cloudflare Zero Trust dashboard and route your
+#      hostname to  http://website:8080
+#   5. ./FloRunWeb/deploy/install.sh
+#   6. Follow the "Next steps" it prints.
+# ---------------------------------------------------------------------------
+
+# Where `git clone` pulls the site from. Used only when the checkout below does
+# not exist yet (first run / fresh server); day-to-day the updater runs
+# `git pull` inside the existing checkout. Point this at your fork if you have
+# one.
+REPO_URL=https://github.com/jordanp123/florun.git
+
+# Directory name of the git checkout, created under the webroot. The updater
+# passes this to `git clone` explicitly, so it does NOT have to match the repo
+# name -- keeping it distinct from the webroot (~/florun/FloRunWeb) is what
+# makes "webroot" and "checkout" tellable apart at a glance.
+# Letters/digits/._- only.
+CHECKOUT_DIR=FloRunWeb
+
+# Unprivileged UIDs the containers run as. Pick a range unused by other stacks
+# on the same host -- distinct per-app UIDs mean one compromised container
+# cannot touch another app's processes. Both must be BELOW the UserNS size in
+# the quadlet units (65536), or the container has nowhere to map and will not
+# start; install.sh refuses the install rather than let that fail later.
+APP_UID=17011
+TUNNEL_UID=17010
+
+# Container-name prefix (must be unique per stack on the host).
+# Letters/digits/_- only.
+STACK_NAME=FloRun
+
+# URL path segment the site is served under: https://your.domain/<SUBPATH>/
+# Letters/digits/._- only. A single dot (SUBPATH=.) serves at the domain root,
+# which is the stock FloRun setup -- it expects its own subdomain, e.g.
+# florun.example.com, so the service worker controls the whole origin and the
+# manifest start_url is simply "/".
+#
+# If you DO serve from a subpath, point the Cloudflare tunnel route at the
+# matching hostname/path; the app itself uses relative URLs throughout and
+# needs no other change.
+SUBPATH=.

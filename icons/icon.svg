@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="FloRun">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f2731f"/>
+      <stop offset="1" stop-color="#c74515"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#g)"/>
+  <path fill="#ffffff"
+        d="M256 84 C 168 214, 108 292, 108 348 a 148 148 0 0 0 296 0 C 404 292, 344 214, 256 84 Z"/>
+  <ellipse cx="205" cy="300" rx="26" ry="38" fill="#ffffff" opacity="0.55"/>
+</svg>

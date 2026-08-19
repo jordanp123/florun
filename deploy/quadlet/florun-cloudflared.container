@@ -1,0 +1,47 @@
+# Cloudflare tunnel sidecar. Joins BOTH networks: backend (to reach nginx) and
+# egress (to reach the Cloudflare edge). nginx itself never touches egress.
+# deploy/install.sh rewrites ContainerName / User / Group from config.florun.
+[Unit]
+Description=Cloudflare tunnel for FloRun
+After=network-online.target florun-website.service
+Wants=network-online.target
+
+[Container]
+ContainerName=cloudflared-tunnel-FloRun
+Image=docker.io/cloudflare/cloudflared:latest
+Exec=tunnel run
+# The tunnel token comes from a podman secret, NOT from a file in the deploy
+# directory -- so it is never in the webroot, the build context, a backup of
+# either, or this unit. Podman injects it as TUNNEL_TOKEN at container start,
+# which is the variable cloudflared already reads. Create it once with:
+#   printf '%s' 'YOUR-TOKEN' | podman secret create florun-tunnel-token -
+# (printf, not echo -- a trailing newline is stored verbatim and cloudflared
+# rejects the token with a confusing auth error.)
+#
+# Honest scope note: podman's default secret driver stores secrets base64
+# encoded in the user's container storage -- NOT encrypted. This is better
+# scoping and hygiene, not encryption at rest.
+Secret=florun-tunnel-token,type=env,target=TUNNEL_TOKEN
+Network=florun-backend.network
+Network=florun-egress.network
+# Marks the image eligible for `podman auto-update`, which florun-update.timer
+# does NOT run -- florun-update.sh pulls this image explicitly every night. The
+# label only matters if you also enable podman's own podman-auto-update.timer
+# (shipped disabled) to cover every container on the host.
+AutoUpdate=registry
+
+# --- hardening ---
+User=17010
+Group=17010
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+UserNS=auto:size=65536
+PodmanArgs=--memory=256m --pids-limit=4096 --cpu-shares=768
+
+[Service]
+Restart=always
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

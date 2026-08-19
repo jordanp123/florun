@@ -1,0 +1,51 @@
+# FloRun static site (nginx-unprivileged), hardened.
+# deploy/install.sh rewrites ContainerName / User / Group from config.florun --
+# nothing here needs hand-editing if you install with that script.
+[Unit]
+Description=FloRun static site
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+ContainerName=FloRun
+# Refers to florun-website.build, which tags localhost/florun-website:latest.
+# florun-update.sh rebuilds that tag, so a restart picks up the new image.
+Image=florun-website.build
+Network=florun-backend.network
+# Point the tunnel's ingress rule at http://website:8080 -- this alias keeps
+# that stable even if the container name changes via config.florun.
+NetworkAlias=website
+
+# --- hardening ---
+User=17011
+Group=17011
+ReadOnly=true
+NoNewPrivileges=true
+DropCapability=ALL
+
+# Podman UserNS remapping gives this container its own private, non-overlapping
+# range of host UIDs, so a process escaping it lands in a namespace that does
+# not overlap the tunnel's -- or any other stack's on the host. Costs
+# containers x size subuids (2 x 65536 here). If /etc/subuid and /etc/subgid
+# are too small the container simply will not start: widen them, then
+# `podman system migrate`, daemon-reload, and restart.
+UserNS=auto:size=65536
+
+# The image is read-only, so everything nginx writes at runtime goes to tmpfs.
+Tmpfs=/tmp:rw,noexec,nosuid,nodev,size=64M
+Tmpfs=/run:rw,noexec,nosuid,nodev,size=16M
+Tmpfs=/var/cache/nginx:rw,noexec,nosuid,nodev,size=64M
+
+# Resource limits. Quadlet has no native keys for these, so they go through the
+# PodmanArgs catch-all. Rootless --cpus needs cgroups v2 delegation (default on
+# modern systemd distros); drop it if the container fails to start citing
+# cgroups -- memory and pids limits work regardless.
+PodmanArgs=--memory=128m --pids-limit=512 --cpus=1
+
+[Service]
+Restart=always
+# A cold first start may build the image; don't let systemd time it out.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

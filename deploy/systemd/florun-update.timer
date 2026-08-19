@@ -1,0 +1,15 @@
+# 05:00 local, with jitter so a fleet of hosts does not stampede the registry
+# at the same second. Persistent=true means a machine that was asleep or off at
+# 05:00 catches up on the next boot rather than silently skipping a day.
+[Unit]
+Description=Run the FloRun update daily
+Documentation=file:%h/florun/FloRunWeb/deploy/README.md
+
+[Timer]
+OnCalendar=*-*-* 05:00:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=florun-update.service
+
+[Install]
+WantedBy=timers.target

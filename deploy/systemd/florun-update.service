@@ -1,0 +1,21 @@
+# The daily refresh. Rootless: runs as the deploy user, never as root.
+# install.sh rewrites the WEBSWR-style base path below to your real webroot.
+[Unit]
+Description=FloRun daily update (pull, rebuild, restart)
+Documentation=file:%h/florun/FloRunWeb/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=FLORUN_BASE=%h/florun
+ExecStart=%h/.local/bin/florun-update.sh
+# The updater builds a container image; give it room but not forever.
+TimeoutStartSec=1800
+# Journald captures the same lines the updater appends to update.log, so
+# `journalctl --user -u florun-update` is a complete record on its own.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

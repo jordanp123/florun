@@ -1,0 +1,11 @@
+# Internal-only network: the nginx container can answer the tunnel but has NO
+# route to the internet at all. FloRun is a static file server whose app makes
+# zero network requests, so its egress need is genuinely nil -- and an app that
+# handles location and photos is exactly the kind that should not be able to
+# phone home even if it were compromised.
+[Unit]
+Description=FloRun internal network (no egress)
+
+[Network]
+NetworkName=florun-backend
+Internal=true

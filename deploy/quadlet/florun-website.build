@@ -1,0 +1,17 @@
+# Builds the site image from the assembled WEBROOT, so a cold
+# `systemctl --user start florun-website.service` works without a manual build.
+# The daily florun-update.sh rebuilds this same tag with --pull (base-image
+# freshness), so day to day this unit is only the cold-start path.
+#
+# NOTE the build context is the webroot -- the assembled site -- NOT the git
+# checkout, which lives inside it. deploy/install.sh rewrites %h/florun to your
+# actual webroot and BuildArg SUBPATH from config.florun, so nothing here needs
+# hand-editing if you install with that script.
+[Unit]
+Description=Build the FloRun site image
+
+[Build]
+ImageTag=localhost/florun-website:latest
+File=%h/florun/Dockerfile
+SetWorkingDirectory=%h/florun
+BuildArg=SUBPATH=.

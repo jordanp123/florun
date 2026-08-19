@@ -1,0 +1,16 @@
+# The build context is the assembled webroot. Allowlist: start by excluding
+# everything, then re-admit exactly the files the image needs. A denylist here
+# would eventually leak update.log, config.florun or the git checkout into a
+# layer the moment someone adds a file and forgets to update this.
+*
+!index.html
+!manifest.webmanifest
+!sw.js
+!nginx.conf
+!Dockerfile
+!css/
+!css/*.css
+!js/
+!js/*.js
+!icons/
+!icons/*
