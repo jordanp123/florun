@@ -170,6 +170,21 @@ check("updater no longer clones (the checkout must already exist)",
 check("updater requires the install dir to be a git checkout",
       "is not a git checkout" in updater)
 check("updater pulls fast-forward only", "pull --ff-only" in updater)
+# is-active proves the process started; only a content probe proves the right
+# thing is being served. This is what turns a wrong SUBPATH from a silently
+# broken site into a failed, rolled-back deploy.
+check("updater smoke-tests the served page", "SMOKE TEST FAILED" in updater)
+check("updater probes the configured subpath",
+      'PROBE="/$SUBPATH/"' in updater)
+check("updater reports an un-runnable probe as skipped, not passed",
+      "smoke test SKIPPED" in updater)
+check("updater rolls back a failed smoke test",
+      updater.count("Rolling back to the previous image") >= 1 or
+      updater.count("rolling back to the previous image") >= 2)
+# The subpath question is a yes/no so the common case cannot be fumbled into a
+# subdirectory by typing the app's name.
+check("installer asks about the domain root as a yes/no",
+      "Serve at the domain root?" in installer)
 check("config example carries no dead REPO_URL/CHECKOUT_DIR keys",
       not re.search(r"^REPO_URL=", example, re.M) and
       not re.search(r"^CHECKOUT_DIR=", example, re.M))

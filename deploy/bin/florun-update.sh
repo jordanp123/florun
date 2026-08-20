@@ -162,6 +162,51 @@ if ! systemctl --user is-active --quiet florun-website.service; then
   exit 1
 fi
 
+# ── Smoke test ───────────────────────────────────────────────────────
+# is-active only proves the process is up; it says nothing about WHAT is being
+# served. A wrong SUBPATH puts the site in a subdirectory and leaves nginx's
+# stock welcome page at the root -- a deployment that looks healthy from every
+# angle except the one that matters (container running, tunnel connected, site
+# wrong). Fetch the exact path the tunnel will hit and confirm FloRun is in it.
+#
+# A probe that cannot run is reported as skipped, never as a pass: "no wget in
+# the image" and "the site is broken" must not produce the same silence.
+if [ "$SUBPATH" = "." ]; then PROBE="/"; else PROBE="/$SUBPATH/"; fi
+if podman exec "$STACK_NAME" sh -c 'command -v wget' >/dev/null 2>&1; then
+  BODY="$(podman exec "$STACK_NAME" wget -qO- "http://127.0.0.1:8080$PROBE" 2>/dev/null || true)"
+  case "$BODY" in
+    *FloRun*)
+      echo "smoke test: $PROBE serves FloRun"
+      ;;
+    *)
+      echo "SMOKE TEST FAILED: $PROBE does not serve FloRun." >&2
+      case "$BODY" in
+        *"Welcome to nginx"*)
+          echo "  It is nginx's stock welcome page, which means the site was built into a" >&2
+          echo "  subdirectory. SUBPATH is currently '$SUBPATH'; for a dedicated subdomain" >&2
+          echo "  it should be '.' -- fix it in config.florun AND in the BuildArg line of" >&2
+          echo "  ~/.config/containers/systemd/florun-website.build, or re-run" >&2
+          echo "  deploy/install.sh --reconfigure." >&2
+          ;;
+        "")
+          echo "  The server returned nothing at that path." >&2
+          ;;
+        *)
+          echo "  Something is being served there, but it is not FloRun." >&2
+          ;;
+      esac
+      echo "  Rolling back to the previous image." >&2
+      if podman image exists "$ROLLBACK"; then
+        podman tag "$ROLLBACK" "$IMAGE"
+        systemctl --user restart florun-website.service || true
+      fi
+      exit 1
+      ;;
+  esac
+else
+  echo "smoke test SKIPPED: no wget in the container image (probe could not run)"
+fi
+
 # ── Record and clean up ──────────────────────────────────────────────
 # Forensic record: exactly what is deployed right now. With the start/OK
 # banners this makes the log a verifiable timeline of every change that

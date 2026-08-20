@@ -235,7 +235,19 @@ if [ "$WRITE_CONFIG" -eq 1 ]; then
     fi
   done
 
-  ask SUBPATH      "URL subpath, or '.' for the domain root" "$d_subpath" v_subpath
+  # Asked as a yes/no rather than "type a path, or '.' for the root".
+  # The old free-text prompt invited typing the app's name -- which is a
+  # perfectly reasonable thing to type, and silently wrong on a dedicated
+  # subdomain: the files land in /florun/ and the domain root serves nginx's
+  # stock welcome page instead. The common case is now one keypress.
+  if [ "$d_subpath" = "." ]; then subpath_default=y; else subpath_default=n; fi
+  if confirm "Serve at the domain root? (yes for a dedicated subdomain, e.g. florun.example.com)" "$subpath_default"; then
+    SUBPATH="."
+  else
+    note "The site will be served under https://your.domain/<subpath>/"
+    if [ "$d_subpath" = "." ]; then subpath_hint="florun"; else subpath_hint="$d_subpath"; fi
+    ask SUBPATH "URL path segment" "$subpath_hint" v_subpath
+  fi
 
   # Written fresh rather than sed-patched, so the file always matches what this
   # version of the installer understands. 0600: it holds no secrets, but it
