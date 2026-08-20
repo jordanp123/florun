@@ -230,13 +230,14 @@ check("Dockerfile copies index.html", "index.html" in dockerfile)
 check("Dockerfile copies the manifest", "manifest.webmanifest" in dockerfile)
 check("Dockerfile copies the service worker", "sw.js" in dockerfile)
 check("Dockerfile copies nginx.conf", "nginx.conf" in dockerfile)
-# The stock nginx welcome page must never be servable from our image: with a
-# non-root SUBPATH it would silently answer the domain root and look like a
-# working deployment.
-check("Dockerfile removes the stock nginx index page",
-      "rm -f /usr/share/nginx/html/index.html" in dockerfile)
-check("Dockerfile restores an unprivileged USER after the root RUN",
-      dockerfile.rstrip().splitlines()[-1].strip().startswith("USER "))
+# COPY-only, no RUN. A RUN step added here to delete the base image's stock
+# welcome page broke the deployed image, and every other stack on this host
+# builds with COPY alone. The smoke test in the updater covers what that RUN
+# was for, and covers strictly more of it.
+check("Dockerfile has no RUN step",
+      not re.search(r"^\s*RUN\b", dockerfile, re.M))
+check("Dockerfile does not switch to USER root",
+      not re.search(r"^\s*USER\s+root\b", dockerfile, re.M))
 
 # ── nginx ────────────────────────────────────────────────────────────
 

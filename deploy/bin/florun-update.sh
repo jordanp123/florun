@@ -193,28 +193,37 @@ fi
 # the image" and "the site is broken" must not produce the same silence.
 if [ "$SUBPATH" = "." ]; then PROBE="/"; else PROBE="/$SUBPATH/"; fi
 if podman exec "$STACK_NAME" sh -c 'command -v wget' >/dev/null 2>&1; then
-  BODY="$(podman exec "$STACK_NAME" wget -qO- "http://127.0.0.1:8080$PROBE" 2>/dev/null || true)"
-  case "$BODY" in
+  # -S puts the response headers on stderr, and 2>&1 keeps them: busybox wget
+  # with -q prints NOTHING for a 404, a refused connection or an empty body
+  # alike, so without the status line a failure says only "returned nothing" --
+  # which is exactly as unhelpful as it sounds when the deploy is broken.
+  RESP="$(podman exec "$STACK_NAME" wget -S -O- "http://127.0.0.1:8080$PROBE" 2>&1 || true)"
+  STATUS="$(printf '%s\n' "$RESP" | sed -n 's|^ *HTTP/1\.[01] \([0-9][0-9][0-9]\).*|\1|p' | head -1)"
+
+  case "$RESP" in
     *FloRun*)
-      echo "smoke test: $PROBE serves FloRun"
+      echo "smoke test: $PROBE serves FloRun (HTTP ${STATUS:-200})"
       ;;
     *)
-      echo "SMOKE TEST FAILED: $PROBE does not serve FloRun." >&2
-      case "$BODY" in
+      echo "SMOKE TEST FAILED: $PROBE did not serve FloRun (HTTP ${STATUS:-none})." >&2
+      case "$RESP" in
         *"Welcome to nginx"*)
-          echo "  It is nginx's stock welcome page, which means the site was built into a" >&2
-          echo "  subdirectory. SUBPATH is currently '$SUBPATH'; for a dedicated subdomain" >&2
-          echo "  it should be '.' -- fix it in config.florun AND in the BuildArg line of" >&2
-          echo "  ~/.config/containers/systemd/florun-website.build, or re-run" >&2
-          echo "  deploy/install.sh --reconfigure." >&2
-          ;;
-        "")
-          echo "  The server returned nothing at that path." >&2
-          ;;
-        *)
-          echo "  Something is being served there, but it is not FloRun." >&2
+          echo "  It is nginx's stock welcome page: the site was built into a subdirectory." >&2
           ;;
       esac
+      if [ "$STATUS" = "404" ]; then
+        echo "  A 404 at the site root means index.html is not where nginx expects it." >&2
+        echo "  SUBPATH is '$SUBPATH'; check where the files actually landed with:" >&2
+        echo "    podman run --rm --entrypoint sh $IMAGE -c 'ls -R /usr/share/nginx/html'" >&2
+      elif [ -z "$STATUS" ]; then
+        echo "  No HTTP status at all -- nginx did not answer on 127.0.0.1:8080 inside" >&2
+        echo "  the container. Check: podman logs $STACK_NAME" >&2
+      fi
+      # The full response is worth having in the log; a failed deploy is not
+      # the moment to be economical about output.
+      echo "  --- probe response (first 20 lines) ---" >&2
+      printf '%s\n' "$RESP" | head -20 | sed 's/^/  | /' >&2
+      echo "  --- end ---" >&2
       echo "  Rolling back to the previous image." >&2
       if podman image exists "$ROLLBACK"; then
         podman tag "$ROLLBACK" "$IMAGE"
