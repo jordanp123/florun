@@ -92,6 +92,14 @@ LOG="$BASE/update.log"
 umask 077
 if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 1048576 ]; then mv -f "$LOG" "$LOG.1"; fi
 exec > >(tee -a "$LOG") 2>&1
+# Restore a normal umask now that the log file exists. The 077 above must NOT
+# survive into `podman build`: buildah applies the process umask to files and
+# directories it creates during COPY, so a build inheriting 077 can produce an
+# image whose web root is mode 0700 -- owned by the image's root and unreadable
+# by the unprivileged UID the container actually runs as. nginx answers that
+# with 403 Forbidden, which looks nothing like a permissions bug from the
+# outside.
+umask 022
 echo "=== update run started $(date -u +%FT%TZ) ==="
 trap 'echo "=== ABORTED (exit $?) $(date -u +%FT%TZ) ==="' ERR
 
@@ -211,7 +219,13 @@ if podman exec "$STACK_NAME" sh -c 'command -v wget' >/dev/null 2>&1; then
           echo "  It is nginx's stock welcome page: the site was built into a subdirectory." >&2
           ;;
       esac
-      if [ "$STATUS" = "404" ]; then
+      if [ "$STATUS" = "403" ]; then
+        echo "  A 403 at the site root is nginx refusing to serve. Either it cannot READ" >&2
+        echo "  index.html, or index.html is absent and it will not list the directory." >&2
+        echo "  The nginx error log below says which. What the image actually contains:" >&2
+        podman run --rm --entrypoint sh "$IMAGE" -c 'ls -la /usr/share/nginx/html/' 2>&1 |
+          sed 's/^/  | /' >&2
+      elif [ "$STATUS" = "404" ]; then
         echo "  A 404 at the site root means index.html is not where nginx expects it." >&2
         echo "  SUBPATH is '$SUBPATH'; check where the files actually landed with:" >&2
         echo "    podman run --rm --entrypoint sh $IMAGE -c 'ls -R /usr/share/nginx/html'" >&2
@@ -223,6 +237,8 @@ if podman exec "$STACK_NAME" sh -c 'command -v wget' >/dev/null 2>&1; then
       # the moment to be economical about output.
       echo "  --- probe response (first 20 lines) ---" >&2
       printf '%s\n' "$RESP" | head -20 | sed 's/^/  | /' >&2
+      echo "  --- nginx's own log (it names the file it could not serve) ---" >&2
+      podman logs --tail 15 "$STACK_NAME" 2>&1 | sed 's/^/  | /' >&2
       echo "  --- end ---" >&2
       echo "  Rolling back to the previous image." >&2
       if podman image exists "$ROLLBACK"; then

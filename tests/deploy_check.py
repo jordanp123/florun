@@ -174,6 +174,11 @@ check("updater pulls fast-forward only", "pull --ff-only" in updater)
 # thing is being served. This is what turns a wrong SUBPATH from a silently
 # broken site into a failed, rolled-back deploy.
 check("updater smoke-tests the served page", "SMOKE TEST FAILED" in updater)
+# The 077 that keeps update.log owner-only must not survive into podman build:
+# buildah applies the process umask to files it creates during COPY, which can
+# leave the web root unreadable by the container's unprivileged UID (403).
+check("updater restores umask 022 before building",
+      updater.index("umask 022") < updater.index("podman build"))
 check("updater probes the configured subpath",
       'PROBE="/$SUBPATH/"' in updater)
 check("updater reports an un-runnable probe as skipped, not passed",
