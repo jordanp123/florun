@@ -26,6 +26,12 @@
   let pendingPhoto = null;       // { blob, url } held until Save is confirmed
   let saveInFlight = false;
   let commitTimer = null;
+  // Location is acquired while the save sheet is open rather than at the
+  // moment of saving: on the web the permission prompt happens INSIDE the
+  // request, so asking at Save time meant the timeout could expire while the
+  // user was still reading the dialog. Starting early also means the fix is
+  // usually already in hand by the time they finish typing a site label.
+  let locationState = { phase: "idle", result: null, promise: null };
 
   if (!core.MODES[mode]) mode = core.MODES.timedVolume.id;
   if (!core.UNITS[unitId]) unitId = "usGal";
@@ -118,6 +124,7 @@
     $("photoRetake").addEventListener("click", function () { $("photoInput").click(); });
     $("photoRemove").addEventListener("click", clearPendingPhoto);
     $("photoInput").addEventListener("change", onPhotoChosen);
+    $("locationRetry").addEventListener("click", startLocationAcquire);
 
     // History
     $("exportAllBtn").addEventListener("click", toggleExportMenu);
@@ -479,10 +486,7 @@
     $("saveNotes").value = "";
     clearPendingPhoto();
     setPhotoError(null);
-    $("locationStatus").innerHTML = "";
-    $("locationStatus").textContent = FR.geo.isSupported()
-      ? "◎ Will be captured on Save"
-      : "◎ Location unavailable on this device";
+    startLocationAcquire();
     $("photoBtn").hidden = false;
     $("photoField").hidden = !FR.photos.isSupported();
 
@@ -503,10 +507,53 @@
   }
 
   function closeSaveSheet() {
-    if (saveInFlight) FR.geo.cancelInFlight();
+    if (saveInFlight || locationState.phase === "acquiring") FR.geo.cancelInFlight();
     saveInFlight = false;
+    locationState = { phase: "idle", result: null, promise: null };
     clearPendingPhoto();
     $("saveSheet").hidden = true;
+  }
+
+  /* ── location ──────────────────────────────────────────────────────── */
+
+  function startLocationAcquire() {
+    if (!FR.geo.isSupported()) {
+      locationState = { phase: "done", result: { status: FR.geo.STATUS.unsupported, ok: false }, promise: null };
+      renderLocationStatus();
+      return;
+    }
+    locationState = { phase: "acquiring", result: null, promise: null };
+    renderLocationStatus();
+    locationState.promise = FR.geo.requestSingleFix().then(function (res) {
+      locationState.phase = "done";
+      locationState.result = res;
+      renderLocationStatus();
+      return res;
+    });
+  }
+
+  function renderLocationStatus() {
+    const el = $("locationStatus");
+    const retry = $("locationRetry");
+    if (locationState.phase === "acquiring") {
+      el.textContent = "◎ Locating…";
+      retry.hidden = true;
+      return;
+    }
+    const res = locationState.result;
+    if (res && res.ok) {
+      const acc = (res.accuracy != null && res.accuracy > 0)
+        ? "  ±" + Math.round(res.accuracy) + " m" : "";
+      el.textContent = "◎ " + res.latitude.toFixed(4) + ", " + res.longitude.toFixed(4) + acc;
+      retry.hidden = true;
+      return;
+    }
+    el.textContent = "◎ " + FR.geo.describe(res);
+    // Only a timeout or a transient failure is worth retrying on the spot; a
+    // denial needs a trip to browser settings first, and this browser is not
+    // going to grow the API while the sheet is open.
+    retry.hidden = !(res && (res.status === FR.geo.STATUS.timeout ||
+                             res.status === FR.geo.STATUS.unavailable));
   }
 
   function onPhotoChosen(e) {
@@ -544,12 +591,13 @@
     if (saveInFlight || !canSave()) return;
     saveInFlight = true;
     $("saveConfirm").disabled = true;
-    $("locationStatus").textContent = "◎ Capturing location…";
 
-    FR.geo.requestSingleFix().then(function (fix) {
-      $("locationStatus").textContent = fix
-        ? "◎ " + fix.latitude.toFixed(4) + ", " + fix.longitude.toFixed(4)
-        : "◎ Location unavailable — saved without coordinates";
+    // Use whatever the sheet already acquired. If it is still in flight we
+    // wait on that same request rather than starting a second one -- but the
+    // wait is bounded by geo.js's own timeout, so Save can never hang.
+    const pending = locationState.promise || Promise.resolve(locationState.result);
+    pending.then(function (res) {
+      const fix = (res && res.ok) ? res : null;
 
       // The photo is written only after every guard has passed, so an aborted
       // save can never strand an orphaned blob.

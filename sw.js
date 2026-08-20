@@ -13,7 +13,7 @@
  */
 "use strict";
 
-const CACHE = "florun-v1";
+const CACHE = "florun-v2";
 
 // Relative paths so the same worker serves correctly from a domain root or a
 // subpath; "./" covers the start URL itself.
