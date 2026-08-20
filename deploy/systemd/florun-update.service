@@ -1,8 +1,9 @@
 # The daily refresh. Rootless: runs as the deploy user, never as root.
-# install.sh rewrites the WEBSWR-style base path below to your real webroot.
+# install.sh rewrites the %h/florun placeholder below to the real install
+# directory, which is the git checkout itself -- there is no separate webroot.
 [Unit]
 Description=FloRun daily update (pull, rebuild, restart)
-Documentation=file:%h/florun/FloRunWeb/deploy/README.md
+Documentation=file:%h/florun/deploy/README.md
 After=network-online.target
 Wants=network-online.target
 

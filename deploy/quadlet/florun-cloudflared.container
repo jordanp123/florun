@@ -11,8 +11,8 @@ ContainerName=cloudflared-tunnel-FloRun
 Image=docker.io/cloudflare/cloudflared:latest
 Exec=tunnel run
 # The tunnel token comes from a podman secret, NOT from a file in the deploy
-# directory -- so it is never in the webroot, the build context, a backup of
-# either, or this unit. Podman injects it as TUNNEL_TOKEN at container start,
+# directory -- so it is never in the install directory, the build context, a
+# backup of either, or this unit. Podman injects it as TUNNEL_TOKEN at container start,
 # which is the variable cloudflared already reads. Create it once with:
 #   printf '%s' 'YOUR-TOKEN' | podman secret create florun-tunnel-token -
 # (printf, not echo -- a trailing newline is stored verbatim and cloudflared

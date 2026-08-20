@@ -1,7 +1,9 @@
-# The build context is the assembled webroot. Allowlist: start by excluding
-# everything, then re-admit exactly the files the image needs. A denylist here
-# would eventually leak update.log, config.florun or the git checkout into a
-# layer the moment someone adds a file and forgets to update this.
+# The build context is the git checkout itself, which also holds config.florun,
+# update.log and .git. Allowlist: start by excluding everything, then re-admit
+# exactly the files the image needs. A denylist would eventually leak one of
+# those into a layer the moment someone adds a file and forgets to update it --
+# and here the sensitive files are not hypothetical, they are siblings of the
+# ones being copied.
 *
 !index.html
 !manifest.webmanifest

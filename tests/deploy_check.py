@@ -72,6 +72,24 @@ html = read("index.html") or ""
 example = read("config.florun.example") or ""
 updater = read("deploy", "bin", "florun-update.sh") or ""
 
+# ── systemd Documentation= must point at a file that exists ──────────
+# install.sh rewrites the "%h/florun" placeholder to the install directory,
+# which IS the checkout -- so everything after that prefix is a repo-relative
+# path and can be resolved right here. This shipped broken: the units carried
+# a leftover "FloRunWeb/" segment from the old webroot-above-checkout layout,
+# so `systemctl status` advertised a README that was not there. Nothing fails
+# when Documentation= is wrong, which is exactly why it needs a test.
+for _unit in ("florun-update.service", "florun-update.timer"):
+    _text = read("deploy", "systemd", _unit) or ""
+    _docs = re.findall(r"^Documentation=file:(\S+)$", _text, re.M)
+    check(_unit + " declares Documentation=", len(_docs) == 1)
+    for _d in _docs:
+        check(_unit + " Documentation= uses the %h/florun placeholder",
+              _d.startswith("%h/florun/"))
+        _rel = _d[len("%h/florun/"):]
+        check(_unit + " Documentation= resolves to a real file (" + _rel + ")",
+              os.path.isfile(os.path.join(ROOT, _rel)))
+
 # ── isolation: nginx must have no way out ────────────────────────────
 
 check("backend network is internal", "Internal=true" in backend)

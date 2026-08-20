@@ -33,10 +33,12 @@ secrets.*
 *.secret
 
 # Deployment-local configuration. config.florun carries this host's UIDs,
-# stack name and repo URL, and belongs in the WEBROOT (above the checkout)
-# so a pull can never overwrite it -- this entry stops an accidental copy
-# inside the checkout from being committed. The .example IS tracked, hence
-# the negation.
+# stack name and subpath, and the installer writes it INSIDE the checkout --
+# so this entry is load-bearing, not a backstop: it is the only thing keeping
+# a description of the server's layout out of a public repo. Do not remove it
+# on the grounds that the file "lives elsewhere"; it does not. Git never
+# overwrites it on pull because it is untracked. The .example IS tracked,
+# hence the negation.
 config.florun
 config.florun.local
 !config.florun.example
@@ -143,8 +145,8 @@ venv/
 .ruff_cache/
 .mypy_cache/
 
-# Archives -- almost always a backup of the webroot, which would carry
-# config.florun and update.log inside it.
+# Archives -- almost always a backup of the install directory, which would
+# carry config.florun and update.log inside it.
 *.zip
 *.tar
 *.tar.gz
