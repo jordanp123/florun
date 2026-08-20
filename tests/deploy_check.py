@@ -215,6 +215,13 @@ check("Dockerfile copies index.html", "index.html" in dockerfile)
 check("Dockerfile copies the manifest", "manifest.webmanifest" in dockerfile)
 check("Dockerfile copies the service worker", "sw.js" in dockerfile)
 check("Dockerfile copies nginx.conf", "nginx.conf" in dockerfile)
+# The stock nginx welcome page must never be servable from our image: with a
+# non-root SUBPATH it would silently answer the domain root and look like a
+# working deployment.
+check("Dockerfile removes the stock nginx index page",
+      "rm -f /usr/share/nginx/html/index.html" in dockerfile)
+check("Dockerfile restores an unprivileged USER after the root RUN",
+      dockerfile.rstrip().splitlines()[-1].strip().startswith("USER "))
 
 # ── nginx ────────────────────────────────────────────────────────────
 
