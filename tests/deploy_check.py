@@ -177,8 +177,12 @@ check("updater smoke-tests the served page", "SMOKE TEST FAILED" in updater)
 # The 077 that keeps update.log owner-only must not survive into podman build:
 # buildah applies the process umask to files it creates during COPY, which can
 # leave the web root unreadable by the container's unprivileged UID (403).
+# Anchored at line start: the explanatory comment above also contains the
+# words "podman build", and a naive .index() finds that instead.
+_umask = re.search(r"^umask 022$", updater, re.M)
+_build = re.search(r"^podman build\b", updater, re.M)
 check("updater restores umask 022 before building",
-      updater.index("umask 022") < updater.index("podman build"))
+      bool(_umask and _build and _umask.start() < _build.start()))
 check("updater probes the configured subpath",
       'PROBE="/$SUBPATH/"' in updater)
 check("updater reports an un-runnable probe as skipped, not passed",
