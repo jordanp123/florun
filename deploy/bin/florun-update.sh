@@ -110,6 +110,26 @@ ROLLBACK="localhost/florun-website:rollback"
 # safe.directory is failure insurance for a checkout whose ownership drifted.
 git -C "$CHECKOUT" -c safe.directory="$CHECKOUT" pull --ff-only
 
+# ── Refresh the deployment itself ────────────────────────────────────
+# The pull above updates the CHECKOUT, but the running units live in
+# ~/.config/containers/systemd and this very script was copied to
+# ~/.local/bin -- so without this step a change to a quadlet unit, or to the
+# updater, would sit in the checkout doing nothing until someone re-ran
+# install.sh by hand. Re-running it here is safe:
+#
+#   * --yes is non-interactive: it reads the EXISTING config.florun rather than
+#     rewriting it, never touches the tunnel secret, and starts nothing.
+#   * Overwriting this script mid-run cannot corrupt the run, because the { }
+#     wrapper made bash parse the whole file before executing any of it.
+#
+# If install.sh fails the deploy aborts here, with the old containers still
+# serving.
+if [ -x "$CHECKOUT/deploy/install.sh" ]; then
+  echo "--- refreshing units and updater from the checkout ---"
+  "$CHECKOUT/deploy/install.sh" --yes --base-dir "$BASE"
+  echo "--- refresh done ---"
+fi
+
 # ── Sanity-check the tree ────────────────────────────────────────────
 # The build context IS the checkout (there is no separate webroot to assemble:
 # every file the image needs is version-controlled, and .dockerignore is an
