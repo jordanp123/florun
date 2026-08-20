@@ -72,7 +72,7 @@ deploy/
   quadlet/                       -> ~/.config/containers/systemd/
     florun-backend.network         internal-only network (nginx: no egress)
     florun-egress.network          outbound network (tunnel only)
-    florun-website.build           builds the site image from the webroot
+    florun-website.build           builds the site image from the checkout
     florun-website.container       nginx service
     florun-cloudflared.container   tunnel service
   systemd/                       -> ~/.config/systemd/user/
@@ -88,28 +88,28 @@ generic names would collide with another project's units on the same host.
 ## Install
 
 ```sh
-# The webroot holds config.florun and (after the first update) the assembled
-# site. The git checkout lives inside it.
-mkdir -p ~/florun && cd ~/florun
-git clone https://github.com/jordanp123/florun.git FloRunWeb
-./FloRunWeb/deploy/install.sh
+git clone https://github.com/jordanp123/florun.git ~/florun
+cd ~/florun
+./deploy/install.sh
 ```
+
+Everything lives in that one directory: the checkout, `config.florun`,
+`update.log` and the podman build context. **Nothing is written outside it** --
+no files land in your home directory, and removing the directory removes the
+deployment's entire footprint on disk.
 
 That is the whole install. There is no config file to copy and edit first —
 `install.sh` asks for the values it needs and writes `config.florun` for you:
 
 ```
 FloRun installer
-  Webroot:  /home/florun/florun
-  Checkout: /home/florun/florun/FloRunWeb
-  Install for this webroot? [Y/n]
+  Install directory: /home/florun/florun
+  Install here? [Y/n]
 
 Setting up config.florun
   No config.florun yet, so let's create one.
   Press Enter to accept the value shown in brackets.
 
-  Git repository URL [https://github.com/jordanp123/florun.git]:
-  Checkout directory name (under the webroot) [FloRunWeb]:
   Stack name (container name prefix) [FloRun]:
   UID for the nginx container [17011]:
   UID for the tunnel container [17010]:
@@ -136,32 +136,32 @@ Decline any of them and the closing summary lists exactly what is left, with
 the command to run.
 
 `install.sh` is safe to re-run — after editing a unit, pulling a new version, or
-moving the webroot. A second run does **not** re-interrogate you: an existing
+moving the checkout. A second run does **not** re-interrogate you: an existing
 `config.florun` is read and validated, not replaced.
 
 | Flag | Effect |
 | --- | --- |
-| `--yes`, `-y` | Non-interactive: accept the detected webroot, take every default, never prompt, never touch a secret, never start anything. |
+| `--yes`, `-y` | Non-interactive: accept the detected directory, take every default, never prompt, never touch a secret, never start anything. |
 | `--reconfigure` | Re-run the questions even though `config.florun` exists; your current values become the defaults. |
-| `--base-dir PATH` | Install for a webroot other than the checkout's parent (or set `FLORUN_BASE=PATH`). |
+| `--base-dir PATH` | Install into a directory other than the checkout (or set `FLORUN_BASE=PATH`). |
 | `--help`, `-h` | Usage. |
 
 It also drops to non-interactive automatically when stdin is not a terminal, so
 running it from a script, CI or a systemd unit can never hang on a prompt.
 
 `config.florun.example` is still shipped as the annotated reference for what
-each value means, and you can copy and edit it by hand if you prefer — the
+each value means, and you can copy it to `config.florun` and edit it by hand — the
 installer will use it as-is and skip its own questions.
 
 **It does the interpolation Quadlet can't.** Quadlet files are systemd units, so
 they don't expand `${VAR}`. `install.sh` reads your `config.florun` once and
 writes `APP_UID`, `TUNNEL_UID`, `STACK_NAME` and `SUBPATH` into the installed
-units, plus rewrites the `%h/florun` placeholder to your real webroot.
+units, plus rewrites the `%h/florun` placeholder to your real install path.
 `config.florun` stays the single source of truth; nothing is hand-edited.
 
 ## The daily refresh
 
-`bin/florun-update.sh` pulls, reassembles the webroot, rebuilds the image with
+`bin/florun-update.sh` pulls, rebuilds the image with
 `--pull` (so the nginx base keeps getting CVE fixes), restarts the units, and
 prunes. Order is the failsafe: nothing is stopped until the new image is built,
 and **a rollout that fails to come up is rolled back to the previous image**
@@ -170,7 +170,7 @@ automatically.
 It refuses to run as root, parses `config.florun` as data (never sources it),
 validates every value before touching anything, and appends a start banner, an
 `OK`/`ABORTED` line with exit code, and the deployed commit + image id to a
-size-rotated `update.log` in the webroot (mode 0600).
+size-rotated `update.log` in the install directory (mode 0600).
 
 ```sh
 systemctl --user start florun-update.service      # run it now
@@ -178,8 +178,8 @@ journalctl --user -u florun-update -f             # watch
 systemctl --user list-timers florun-update.timer  # when is it next due?
 ```
 
-Run it directly with `FLORUN_BASE=/path/to/webroot ~/.local/bin/florun-update.sh`
-if your webroot is not `~/florun` (the timer needs nothing extra — the unit
+Run it directly with `FLORUN_BASE=/path/to/checkout ~/.local/bin/florun-update.sh`
+if your checkout is not `~/florun` (the timer needs nothing extra — the unit
 carries the path).
 
 ## The tunnel token
@@ -195,7 +195,7 @@ Always `printf '%s'`, never `echo`: a trailing newline is stored verbatim and
 cloudflared rejects the token with a confusing auth error.
 
 What this buys, stated honestly: the token **leaves the deploy directory** — it
-is not in the webroot, the build context, a backup of either, or any unit file.
+is not in the checkout, the build context, a backup of either, or any unit file.
 Rotation and inventory become managed operations. What it does **not** buy:
 podman's default secret driver stores secrets base64-encoded in the user's
 container storage — **not encrypted**. Anyone who can read that user's files (or

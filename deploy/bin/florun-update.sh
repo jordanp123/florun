@@ -1,7 +1,7 @@
 #!/bin/bash
 # FloRun daily deploy (rootless podman, run by florun-update.timer).
 #
-# Order is the failsafe: pull before touching the webroot, build the new image
+# Order is the failsafe: pull before touching anything, build the new image
 # before stopping anything, and prune only once the new containers are up. Any
 # failure aborts (set -e) and the running container keeps serving last-known
 # good. If a fresh build starts but the container will not come up, the
@@ -12,31 +12,39 @@
 #
 # All deployment-specific values live in config.florun (see
 # config.florun.example); this script carries no hardcoded paths, UIDs or
-# names. It self-locates: the webroot is wherever config.florun lives -- either
+# names. It self-locates: the install directory is wherever config.florun lives --
 # FLORUN_BASE, this script's own directory, or its parent.
 {
 set -eEu
 
 # ── Refuse root ──────────────────────────────────────────────────────
 # The whole point of the rootless deployment is that this job is not root. A
-# root run would also leave root-owned files in a webroot the service user then
+# root run would also leave root-owned files in a checkout the service user then
 # cannot write.
 if [ "$(id -u)" -eq 0 ]; then
   echo "FATAL: florun-update.sh must not run as root (this is the rootless deployment)." >&2
   exit 1
 fi
 
+# The install directory is the git checkout: config.florun, update.log and the
+# build context all live inside it, and nothing is written outside it. The
+# systemd unit passes FLORUN_BASE; the walk-up is for running this by hand from
+# somewhere inside the checkout.
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+BASE=""
 if [ -n "${FLORUN_BASE:-}" ] && [ -f "$FLORUN_BASE/config.florun" ]; then
   BASE="$(cd "$FLORUN_BASE" && pwd)"
-elif [ -f "$SELF_DIR/../config.florun" ]; then
-  BASE="$(cd "$SELF_DIR/.." && pwd)"
-elif [ -f "$SELF_DIR/config.florun" ]; then
-  BASE="$SELF_DIR"
 else
-  echo "FATAL: config.florun not found (looked in \$FLORUN_BASE, $SELF_DIR and its parent)." >&2
-  echo "Copy config.florun.example to the webroot as config.florun and edit it." >&2
-  echo "Nothing was changed." >&2
+  probe="$SELF_DIR"
+  for _ in 1 2 3 4; do
+    if [ -f "$probe/config.florun" ]; then BASE="$probe"; break; fi
+    probe="$(cd "$probe/.." && pwd)"
+    [ "$probe" = "/" ] && break
+  done
+fi
+if [ -z "$BASE" ]; then
+  echo "FATAL: config.florun not found (looked in \$FLORUN_BASE and upward from $SELF_DIR)." >&2
+  echo "Run deploy/install.sh from the checkout to create it. Nothing was changed." >&2
   exit 1
 fi
 
@@ -44,19 +52,13 @@ fi
 # able to execute code, and a malformed line gets a clear FATAL instead of bash
 # noise. KEY=value lines only; last assignment wins; CRLF tolerated.
 cfg() { sed -n "s/^$1=//p" "$BASE/config.florun" | tail -1 | tr -d '\r'; }
-REPO_URL="$(cfg REPO_URL)"
-CHECKOUT_DIR="$(cfg CHECKOUT_DIR)"
 APP_UID="$(cfg APP_UID)"
 TUNNEL_UID="$(cfg TUNNEL_UID)"
 STACK_NAME="$(cfg STACK_NAME)"
 SUBPATH="$(cfg SUBPATH)"
 
 # Validate BEFORE touching anything: a typo'd or missing value aborts here with
-# the webroot untouched and the running site still serving.
-[ -n "$REPO_URL" ] || { echo "FATAL: config.florun must set REPO_URL" >&2; exit 1; }
-case "$CHECKOUT_DIR" in
-  *[!A-Za-z0-9._-]*|""|.|..|*..*) echo "FATAL: CHECKOUT_DIR must be a plain directory name (A-Za-z0-9._- and no '..')" >&2; exit 1 ;;
-esac
+# nothing changed and the running site still serving.
 case "$SUBPATH" in
   .) ;; # sanctioned: serve at the domain root
   *[!A-Za-z0-9._-]*|""|*..*) echo "FATAL: SUBPATH must be a plain path segment (A-Za-z0-9._- and no '..') or '.'" >&2; exit 1 ;;
@@ -93,22 +95,27 @@ exec > >(tee -a "$LOG") 2>&1
 echo "=== update run started $(date -u +%FT%TZ) ==="
 trap 'echo "=== ABORTED (exit $?) $(date -u +%FT%TZ) ==="' ERR
 
-CHECKOUT="$BASE/$CHECKOUT_DIR"
+CHECKOUT="$BASE"
 IMAGE="localhost/florun-website:latest"
 ROLLBACK="localhost/florun-website:rollback"
 
+[ -d "$CHECKOUT/.git" ] || {
+  echo "FATAL: $CHECKOUT is not a git checkout. Nothing was changed." >&2; exit 1; }
+
 # ── Fetch ────────────────────────────────────────────────────────────
-# First run on a fresh server clones; day to day it pulls. A failed clone/pull
-# aborts with the webroot untouched.
-if [ ! -d "$CHECKOUT/.git" ]; then
-  git clone "$REPO_URL" "$CHECKOUT"
-fi
+# Pull from whatever remote the checkout already has. --ff-only so a rewritten
+# or diverged history stops the deploy rather than being silently merged into
+# something nobody reviewed. A failed pull aborts with nothing changed.
+#
+# safe.directory is failure insurance for a checkout whose ownership drifted.
 git -C "$CHECKOUT" -c safe.directory="$CHECKOUT" pull --ff-only
 
-# ── Assemble the webroot ─────────────────────────────────────────────
-# The build context is the webroot, not the checkout. Copy only the files the
-# image actually needs, and refuse symlinks: nothing from the repo should be
-# able to make the build follow a link out of the tree.
+# ── Sanity-check the tree ────────────────────────────────────────────
+# The build context IS the checkout (there is no separate webroot to assemble:
+# every file the image needs is version-controlled, and .dockerignore is an
+# allowlist so .git, tests/ and deploy/ never enter the context). Confirm the
+# expected files are present and are real files -- a symlink here would make
+# the build follow a link out of the tree.
 for item in index.html manifest.webmanifest sw.js Dockerfile nginx.conf .dockerignore; do
   if [ -h "$CHECKOUT/$item" ] || [ ! -f "$CHECKOUT/$item" ]; then
     echo "FATAL: expected regular file $item is missing from the checkout" >&2; exit 1
@@ -119,12 +126,6 @@ for d in css js icons; do
     echo "FATAL: expected directory $d is missing from the checkout" >&2; exit 1
   fi
 done
-
-rm -rf "$BASE/css" "$BASE/js" "$BASE/icons"
-cp -R "$CHECKOUT/css" "$CHECKOUT/js" "$CHECKOUT/icons" "$BASE/"
-cp "$CHECKOUT/index.html" "$CHECKOUT/manifest.webmanifest" "$CHECKOUT/sw.js" \
-   "$CHECKOUT/Dockerfile" "$CHECKOUT/nginx.conf" "$BASE/"
-cp "$CHECKOUT/.dockerignore" "$BASE/"
 
 # ── Build ────────────────────────────────────────────────────────────
 # Keep the currently-deployed image so a failed rollout can be undone. --pull

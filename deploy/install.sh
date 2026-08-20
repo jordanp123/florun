@@ -1,11 +1,11 @@
 #!/bin/bash
 # Installs the FloRun rootless-Podman deployment: quadlet units, the systemd
 # timer and the updater. Safe to re-run -- after editing a unit, pulling a new
-# version, or moving the webroot.
+# version, or moving the checkout.
 #
 # It exists because Quadlet files are systemd units and systemd does NOT expand
 # ${VAR}. This script reads config.florun once and writes the real UIDs, names,
-# subpath and webroot into the installed copies, so config.florun stays the
+# subpath and install path into the installed copies, so config.florun stays the
 # single source of truth and nothing is ever hand-edited.
 #
 # On a first install (no config.florun yet) it runs an interactive setup that
@@ -17,16 +17,16 @@ usage() {
   cat <<'USAGE'
 Usage: deploy/install.sh [--yes] [--base-dir PATH] [--reconfigure]
 
-  --yes, -y         non-interactive: accept the detected webroot and take the
+  --yes, -y         non-interactive: accept the detected directory and take the
                     default for every setting. Never prompts, never touches a
                     secret, never starts anything.
-  --base-dir PATH   webroot to install into (or set FLORUN_BASE=PATH)
+  --base-dir PATH   install directory to use (or set FLORUN_BASE=PATH)
   --reconfigure     re-run the interactive setup even though config.florun
                     already exists (the current values become the defaults)
   --help, -h        this message
 
-The webroot is the directory that holds config.florun, with the git checkout
-inside it. Typically ~/florun.
+By default this is the git checkout itself: config.florun, update.log and the
+build context all live inside it, and nothing is written outside it.
 USAGE
 }
 
@@ -106,21 +106,6 @@ bad()     { printf '  !! %s\n' "$1" >&2; }
 
 # ── validators (same rules the updater enforces at 05:00) ────────────
 
-v_repo_url() {
-  case "$1" in
-    "") bad "cannot be empty"; return 1 ;;
-    http://*|https://*|git@*|ssh://*) return 0 ;;
-    *) bad "expected an http(s), git@ or ssh:// URL"; return 1 ;;
-  esac
-}
-v_dirname() {
-  case "$1" in
-    ""|.|..) bad "must be a plain directory name"; return 1 ;;
-    *..*) bad "must not contain '..'"; return 1 ;;
-    *[!A-Za-z0-9._-]*) bad "only letters, digits and . _ - are allowed"; return 1 ;;
-    *) return 0 ;;
-  esac
-}
 v_stack() {
   case "$1" in
     "") bad "cannot be empty"; return 1 ;;
@@ -152,21 +137,31 @@ v_uid() {
   return 0
 }
 
-# ── locate the webroot ───────────────────────────────────────────────
+# ── locate the install directory ─────────────────────────────────────
+# The checkout IS the install directory: config.florun, update.log and the
+# podman build context all live inside it, and nothing is ever written outside
+# it. Defaulting to the checkout's PARENT (as the WebSWR layout this was
+# derived from does) meant that cloning into your home directory quietly made
+# $HOME the webroot and scattered config, logs and a copy of the site through
+# it. WebSWR needs that split because its webroot also holds data files fetched
+# daily that are not in the repo; FloRun has no generated files, so the split
+# bought nothing and cost a tidy server.
 
 if [ -n "$BASE_ARG" ]; then
   BASE="$(cd "$BASE_ARG" 2>/dev/null && pwd)" || {
     echo "FATAL: --base-dir '$BASE_ARG' does not exist" >&2; exit 1; }
 else
-  BASE="$(cd "$REPO_DIR/.." && pwd)"
+  BASE="$REPO_DIR"
 fi
 
 heading "FloRun installer"
-note "Webroot:  $BASE"
-note "Checkout: $REPO_DIR"
+note "Install directory: $BASE"
+if [ "$BASE" != "$REPO_DIR" ]; then
+  note "Checkout:          $REPO_DIR"
+fi
 
 if [ "$INTERACTIVE" -eq 1 ]; then
-  confirm "Install for this webroot?" y || { echo "Aborted; nothing was changed." >&2; exit 1; }
+  confirm "Install here?" y || { echo "Aborted; nothing was changed." >&2; exit 1; }
 fi
 
 CONFIG="$BASE/config.florun"
@@ -175,8 +170,12 @@ CONFIG="$BASE/config.florun"
 
 # Defaults come from an existing config when there is one, so --reconfigure
 # offers your current values back rather than the stock ones.
-d_repo="https://github.com/jordanp123/florun.git"
-d_checkout="FloRunWeb"
+#
+# There is deliberately no REPO_URL or CHECKOUT_DIR here any more. Both only
+# ever mattered for cloning the repo on a fresh server -- and you cannot reach
+# this script without having cloned it already. The updater pulls from whatever
+# remote the checkout has, which is the same answer with nothing to keep in
+# sync. Config that is never read is config that eventually lies.
 d_stack="FloRun"
 d_app_uid="17011"
 d_tunnel_uid="17010"
@@ -185,8 +184,6 @@ d_subpath="."
 cfg_get() { sed -n "s/^$1=//p" "$CONFIG" 2>/dev/null | tail -1 | tr -d '\r'; }
 
 if [ -f "$CONFIG" ]; then
-  [ -n "$(cfg_get REPO_URL)" ]     && d_repo="$(cfg_get REPO_URL)"
-  [ -n "$(cfg_get CHECKOUT_DIR)" ] && d_checkout="$(cfg_get CHECKOUT_DIR)"
   [ -n "$(cfg_get STACK_NAME)" ]   && d_stack="$(cfg_get STACK_NAME)"
   [ -n "$(cfg_get APP_UID)" ]      && d_app_uid="$(cfg_get APP_UID)"
   [ -n "$(cfg_get TUNNEL_UID)" ]   && d_tunnel_uid="$(cfg_get TUNNEL_UID)"
@@ -216,8 +213,6 @@ else
 fi
 
 if [ "$WRITE_CONFIG" -eq 1 ]; then
-  ask REPO_URL     "Git repository URL" "$d_repo"          v_repo_url
-  ask CHECKOUT_DIR "Checkout directory name (under the webroot)" "$d_checkout" v_dirname
   ask STACK_NAME   "Stack name (container name prefix)" "$d_stack" v_stack
   ask APP_UID      "UID for the nginx container" "$d_app_uid"      v_uid
 
@@ -250,13 +245,13 @@ if [ "$WRITE_CONFIG" -eq 1 ]; then
 # FloRun deployment configuration.
 # Generated by deploy/install.sh on $(date -u +%FT%TZ).
 #
-# Plain KEY=value, no spaces around '=', no quotes. The updater parses this as
-# DATA (it is never executed) and validates every value before touching
-# anything. Holds NO secrets: the Cloudflare tunnel token lives in a podman
-# secret. Re-run 'deploy/install.sh --reconfigure' to change these values.
+# Lives in the install directory alongside the checkout, and is gitignored, so
+# a pull can never overwrite it. Plain KEY=value, no spaces around '=', no
+# quotes. The updater parses this as DATA (it is never executed) and validates
+# every value before touching anything. Holds NO secrets: the Cloudflare tunnel
+# token lives in a podman secret. Re-run 'deploy/install.sh --reconfigure' to
+# change these values.
 
-REPO_URL=$REPO_URL
-CHECKOUT_DIR=$CHECKOUT_DIR
 APP_UID=$APP_UID
 TUNNEL_UID=$TUNNEL_UID
 STACK_NAME=$STACK_NAME
@@ -266,14 +261,12 @@ CONFIGEOF
   note ""
   note "Wrote $CONFIG"
 else
-  REPO_URL="$d_repo"; CHECKOUT_DIR="$d_checkout"; STACK_NAME="$d_stack"
+  STACK_NAME="$d_stack"
   APP_UID="$d_app_uid"; TUNNEL_UID="$d_tunnel_uid"; SUBPATH="$d_subpath"
 fi
 
 # Validate whatever we ended up with -- an existing hand-edited config gets the
 # same scrutiny as a freshly generated one.
-v_repo_url "$REPO_URL" || { echo "FATAL: bad REPO_URL in $CONFIG" >&2; exit 1; }
-v_dirname  "$CHECKOUT_DIR" || { echo "FATAL: bad CHECKOUT_DIR in $CONFIG" >&2; exit 1; }
 v_stack    "$STACK_NAME" || { echo "FATAL: bad STACK_NAME in $CONFIG" >&2; exit 1; }
 v_subpath  "$SUBPATH" || { echo "FATAL: bad SUBPATH in $CONFIG" >&2; exit 1; }
 v_uid      "$APP_UID" || { echo "FATAL: bad APP_UID in $CONFIG" >&2; exit 1; }
@@ -358,7 +351,7 @@ mkdir -p "$QUADLET_DIR" "$SYSTEMD_DIR" "$BIN_DIR"
 heading "Installing units"
 
 # %h/florun is the placeholder the shipped units carry; rewrite it to the real
-# webroot. Everything else comes straight from the config above.
+# install directory. Everything else comes straight from the config above.
 install_unit() {
   local src="$1" dest="$2"
   sed \
@@ -463,7 +456,7 @@ if [ "$LINGER_DONE" -eq 0 ]; then
 fi
 if [ "$FIRST_RUN_DONE" -eq 0 ]; then
   remaining=$((remaining + 1))
-  note "$remaining. First deploy (assembles the webroot, builds, starts everything):"
+  note "$remaining. First deploy (pull, build the image, start everything):"
   note "     systemctl --user start florun-update.service"
   note "     journalctl --user -u florun-update -f"
 fi

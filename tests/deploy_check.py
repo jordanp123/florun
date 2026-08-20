@@ -158,6 +158,23 @@ check("updater refuses to run as root", 'id -u' in updater and "must not run as 
 check("updater parses config as data, never sources it",
       "sed -n" in updater and not re.search(r"^\s*(\.|source)\s+\S*config\.florun", updater, re.M))
 check("updater validates SUBPATH", "SUBPATH must be a plain path segment" in updater)
+# The install directory IS the checkout: nothing may be written outside it, and
+# the updater must never try to assemble a separate webroot (which, when the two
+# are the same directory, would delete the checkout's own tracked files).
+check("updater builds from the checkout, not a separate webroot",
+      'CHECKOUT="$BASE"' in updater)
+check("updater does not rm the site directories (would delete tracked files)",
+      not re.search(r'rm -rf "\$BASE/(css|js|icons)"', updater))
+check("updater no longer clones (the checkout must already exist)",
+      "git clone" not in updater)
+check("updater requires the install dir to be a git checkout",
+      "is not a git checkout" in updater)
+check("updater pulls fast-forward only", "pull --ff-only" in updater)
+check("config example carries no dead REPO_URL/CHECKOUT_DIR keys",
+      not re.search(r"^REPO_URL=", example, re.M) and
+      not re.search(r"^CHECKOUT_DIR=", example, re.M))
+check("installer defaults the install dir to the checkout",
+      'BASE="$REPO_DIR"' in installer)
 check("updater rolls back a failed rollout", "rolling back to the previous image" in updater)
 check("updater pulls the base image (CVE freshness)", "--pull" in updater)
 check("updater prunes only after the new container is up",
