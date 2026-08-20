@@ -174,15 +174,34 @@ check("updater pulls fast-forward only", "pull --ff-only" in updater)
 # thing is being served. This is what turns a wrong SUBPATH from a silently
 # broken site into a failed, rolled-back deploy.
 check("updater smoke-tests the served page", "SMOKE TEST FAILED" in updater)
-# The 077 that keeps update.log owner-only must not survive into podman build:
-# buildah applies the process umask to files it creates during COPY, which can
-# leave the web root unreadable by the container's unprivileged UID (403).
-# Anchored at line start: the explanatory comment above also contains the
-# words "podman build", and a naive .index() finds that instead.
+# The 077 that keeps update.log owner-only must not survive into the git pull:
+# it did once, every file that pull rewrote was created 0600, COPY carried the
+# mode into the image, and nginx answered 403 "Permission denied" for files
+# that were present. Anchored at line start: the explanatory comment above also
+# contains the words "podman build", and a naive .index() finds that instead.
 _umask = re.search(r"^umask 022$", updater, re.M)
+_pull = re.search(r"^git -C .* pull", updater, re.M)
 _build = re.search(r"^podman build\b", updater, re.M)
+check("updater restores umask 022 before pulling",
+      bool(_umask and _pull and _umask.start() < _pull.start()))
 check("updater restores umask 022 before building",
       bool(_umask and _build and _umask.start() < _build.start()))
+
+# git records no mode beyond the executable bit, so a pull performed under a
+# restrictive umask leaves 0600 files that no later pull repairs. The build
+# context must be normalized every run, not just when something changes.
+_chmod = re.search(r"^\s*\[ -e \"\$BASE/\$asset\" \] && chmod -R a\+rX", updater, re.M)
+check("updater normalizes build-context permissions",
+      bool(_chmod))
+check("permission normalization runs before the build",
+      bool(_chmod and _build and _chmod.start() < _build.start()))
+# The served assets are public by definition; the config and the log are not.
+# Widening those would leak the deployment's shape to every account on the host.
+_assets = re.search(r"^for asset in ([^\n]*); do$", updater, re.M)
+check("permission normalization covers the served assets",
+      bool(_assets) and {"index.html", "css", "js", "icons"} <= set(_assets.group(1).split()))
+check("permission normalization spares config.florun and update.log",
+      bool(_assets) and not ({"config.florun", "update.log"} & set(_assets.group(1).split())))
 check("updater probes the configured subpath",
       'PROBE="/$SUBPATH/"' in updater)
 check("updater reports an un-runnable probe as skipped, not passed",

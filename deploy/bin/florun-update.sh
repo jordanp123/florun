@@ -93,12 +93,17 @@ umask 077
 if [ -f "$LOG" ] && [ "$(wc -c < "$LOG")" -gt 1048576 ]; then mv -f "$LOG" "$LOG.1"; fi
 exec > >(tee -a "$LOG") 2>&1
 # Restore a normal umask now that the log file exists. The 077 above must NOT
-# survive into `podman build`: buildah applies the process umask to files and
-# directories it creates during COPY, so a build inheriting 077 can produce an
-# image whose web root is mode 0700 -- owned by the image's root and unreadable
-# by the unprivileged UID the container actually runs as. nginx answers that
-# with 403 Forbidden, which looks nothing like a permissions bug from the
-# outside.
+# survive into the `git pull` below, and this is not a hypothetical: it did,
+# and it broke production. Every file that pull rewrote was created 0600, COPY
+# carried that mode into the image, and nginx -- running as an unprivileged UID
+# that owns none of it -- answered 403 Forbidden for files that were sitting
+# right there. The giveaway is in nginx's own error log, not the HTTP status:
+#
+#   open() ".../index.html" failed (13: Permission denied)
+#
+# What made it stick is that git records no mode beyond the executable bit, so
+# a later pull does not repair those files -- it does not touch them at all.
+# This line stops new damage; the chmod before the build repairs old damage.
 umask 022
 echo "=== update run started $(date -u +%FT%TZ) ==="
 trap 'echo "=== ABORTED (exit $?) $(date -u +%FT%TZ) ==="' ERR
@@ -153,6 +158,24 @@ for d in css js icons; do
   if [ -h "$CHECKOUT/$d" ] || [ ! -d "$CHECKOUT/$d" ]; then
     echo "FATAL: expected directory $d is missing from the checkout" >&2; exit 1
   fi
+done
+
+# ── Normalize permissions in the build context ───────────────────────
+# COPY preserves the source file's mode, so a file that is 0600 on disk is
+# 0600 in the image -- and nginx, running as an unprivileged UID that owns
+# none of it, answers "403 Forbidden / Permission denied" for a file that is
+# demonstrably present. That is a genuinely confusing failure.
+#
+# This is not hypothetical: an earlier version of this script left umask 077
+# set across its own `git pull`, so every file that pull rewrote landed as
+# 0600. Git tracks no mode beyond the executable bit, so those files stay 0600
+# through every subsequent pull and checkout -- the damage outlives the bug.
+#
+# Every file listed here is served publicly by definition, so making them
+# world-readable costs nothing. config.florun and update.log are deliberately
+# NOT in the list: they stay owner-only.
+for asset in index.html manifest.webmanifest sw.js nginx.conf Dockerfile css js icons; do
+  [ -e "$BASE/$asset" ] && chmod -R a+rX "$BASE/$asset"
 done
 
 # ── Build ────────────────────────────────────────────────────────────
