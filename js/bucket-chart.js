@@ -3,11 +3,25 @@
  * Pure, DOM-free.
  *
  * The relationship is NON-linear: the pail tapers, so each inch of water column
- * holds a different volume. Values are the published manufacturer table;
- * anything between two entries is linearly interpolated.
+ * holds a different volume. Anything between two entries is linearly
+ * interpolated.
  *
- * The chart describes a GENERIC 5-gallon pail. Brands differ by a few percent,
- * which is why the UI carries a "verify against your specific bucket" note.
+ * PROVENANCE. These values are COMPUTED, not measured and not transcribed from
+ * a manufacturer's datasheet -- an earlier comment here claimed the latter and
+ * was wrong. They fit the volume integral of a right circular frustum to within
+ * 0.01% across all 58 rows, which is what identifies them as a geometric model.
+ * The dimensions that model implies are published as MODEL below.
+ *
+ * WHAT THAT COSTS. Volume goes as the square of the radius, so small
+ * dimensional differences produce disproportionate volume error, and real
+ * pails vary by more than "a few percent": against typical 5-gallon HDPE
+ * geometry this model reads roughly 6-8% low, and against a wider pail 10-12%
+ * low. It sits at the SMALL end of the range, so where it is wrong it tends to
+ * under-report volume, and therefore under-report flow.
+ *
+ * This is why MODEL is exported and shown in the UI. Telling someone to "verify
+ * against your specific bucket" is not actionable unless they are also told
+ * what they are verifying against.
  */
 (function (root) {
   "use strict";
@@ -79,6 +93,19 @@
   const MAX_GALLONS = ENTRIES[ENTRIES.length - 1][1];
 
   /*
+   * The pail this table describes, recovered from the data by fitting the
+   * frustum volume integral. Inside diameters. Quoted so a user can hold a tape
+   * to their own bucket and know whether this chart applies to it.
+   */
+  const MODEL = {
+    baseDiameterInches: 10.0,
+    topDiameterInches: 11.3,
+    heightInches: MAX_HEIGHT,
+    brimGallons: MAX_GALLONS,
+    summary: "10.0 in base, 11.3 in top, 13.75 in tall",
+  };
+
+  /*
    * Convert a water-column height (inches) to US gallons.
    * Non-positive or non-finite input returns 0; heights above the charted
    * maximum clamp to the maximum volume (the UI warns separately).
@@ -106,5 +133,5 @@
     return isFinite(h) && h >= 0 && h <= MAX_HEIGHT;
   }
 
-  FR.bucket = { ENTRIES, MAX_HEIGHT, MAX_GALLONS, gallonsForHeight, isInRange };
+  FR.bucket = { ENTRIES, MAX_HEIGHT, MAX_GALLONS, MODEL, gallonsForHeight, isInRange };
 })(typeof self !== "undefined" ? self : this);

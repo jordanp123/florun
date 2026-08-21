@@ -26,6 +26,7 @@
   const GRAY = [0.35, 0.35, 0.35];
   const LIGHT = [0.55, 0.55, 0.55];
   const RULE = [0.8, 0.8, 0.8];
+  const FLAG = [0.62, 0.20, 0.12];   // clamped-reading callout
   const STRIPE = [0.97, 0.97, 0.97];
   const HEADER_FILL = [0.9, 0.9, 0.9];
 
@@ -72,6 +73,56 @@
     return y + 14 + used + 6;
   }
 
+  /*
+   * A clamped reading, called out where it happened.
+   *
+   * Both chart lookups saturate at their limits, so a head past the end of the
+   * table yields the same figure as one exactly at the end. On screen that is a
+   * warning the user sees and dismisses; in an exported PDF the number outlives
+   * the warning, and whoever reads it later has no way to tell. Drawn in a
+   * flagged colour immediately under the reading it qualifies.
+   */
+  function drawRangeNote(doc, rec, y) {
+    const core = FR.core;
+    if (!core.rangeWasClamped(rec)) return y;
+    const status = core.rangeStatusFor(rec);
+    const detail = status === core.RANGE.above
+      ? "Reading is beyond the charted maximum; the flow shown is the chart's last value, not a measurement."
+      : "Reading is below the charted minimum and is reported as no flow.";
+    doc.text("Chart range", MARGIN, y + 1, { size: 11, color: GRAY });
+    const used = doc.textBlock(status.toUpperCase() + " -- " + detail,
+      MARGIN + 220, y, CONTENT_WIDTH - 220, { size: 9.5, color: FLAG });
+    return y + Math.max(used, 16) + 4;
+  }
+
+  /*
+   * What the figures above rest on. The app displays four significant figures
+   * in every mode, but the modes do not carry equal precision: a weir value is
+   * interpolated between rows tabulated to three or four figures, and a bucket
+   * value assumes a generic pail whose real-world counterparts differ by
+   * several percent. Stating the basis costs one line and stops the digits
+   * from implying more than they can support.
+   */
+  function drawBasisNote(doc, rec, y) {
+    const core = FR.core;
+    let basis;
+    if (rec.mode === core.MODES.weir.id) {
+      basis = "Interpolated from the " + FR.weir.typeFor(rec.weirType).displayName +
+        " discharge table, whose values are tabulated to 3-4 significant figures.";
+    } else if (rec.mode === core.MODES.manualEntry.id) {
+      basis = "Entered manually; GPH and GPD are arithmetic from the entered GPM.";
+    } else if (rec.volumeUnit && !core.unitFor(rec.volumeUnit).isDirectVolume) {
+      basis = "Derived from a generic 5-gallon pail model (" + FR.bucket.MODEL.summary +
+        "). Individual pails differ, commonly by 5-10%.";
+    } else {
+      basis = "Computed from the captured volume and elapsed time.";
+    }
+    const used = doc.textBlock("Basis: " + basis + " Shown to 4 significant figures; " +
+      "treat as an estimate, not a calibrated measurement.",
+      MARGIN, y + 6, CONTENT_WIDTH, { size: 9, color: LIGHT, italic: true });
+    return y + 6 + used + 4;
+  }
+
   function drawFooter(doc) {
     doc.text(versionLine(), MARGIN, PAGE.height - MARGIN - 12, {
       size: 9, color: LIGHT, align: "center", width: CONTENT_WIDTH,
@@ -110,6 +161,7 @@
       y = drawKV(doc, "Method", "V-notch weir", y);
       y = drawKV(doc, "Notch Geometry", type.displayName, y);
       y = drawKV(doc, "Head Height", fmt.formatVolume(rec.headInches) + " in", y);
+      y = drawRangeNote(doc, rec, y);
     } else if (rec.mode === core.MODES.manualEntry.id) {
       y = drawKV(doc, "Method", "Manual flow rate entry", y);
     } else {
@@ -123,6 +175,7 @@
       }
       y = drawKV(doc, "Volume in US Gallons",
         fmt.formatGallons(core.recordVolumeInUSGallons(rec)), y);
+      if (!unit.isDirectVolume) y = drawRangeNote(doc, rec, y);
     }
 
     y += 10;
@@ -130,6 +183,7 @@
     y = drawKV(doc, "Gallons Per Minute (GPM)", fmt.formatFlow(rec.gpm), y, { bold: true, valueSize: 14 });
     y = drawKV(doc, "Gallons Per Hour (GPH)", fmt.formatFlow(rec.gph), y, { bold: true, valueSize: 14 });
     y = drawKV(doc, "Gallons Per Day (GPD)", fmt.formatFlow(rec.gpd), y, { bold: true, valueSize: 14 });
+    y = drawBasisNote(doc, rec, y);
 
     const hasSite = !!(rec.siteLabel && rec.siteLabel.length);
     const hasNotes = !!(rec.notes && rec.notes.length);
@@ -219,6 +273,9 @@
       reading = fmt.formatVolume(rec.volume) + " " + unit.inputSuffix +
         " / " + fmt.formatElapsed(rec.elapsedSeconds);
     }
+    // A clamped reading is not a measurement; flag it so the row cannot be read
+    // as one. The footnote under the table explains the marker.
+    if (core.rangeWasClamped(rec)) reading += " *";
     return [
       String(index),
       fmt.formatTimestampShort(rec.timestamp),
@@ -267,6 +324,15 @@
 
     if (!sorted.length) {
       doc.text("No measurements saved.", MARGIN, y + 10, { size: 11, color: GRAY });
+    }
+
+    const clamped = sorted.filter(FR.core.rangeWasClamped).length;
+    if (clamped) {
+      if (y + 34 > BOTTOM_LIMIT) { drawFooter(doc); doc.addPage(); y = MARGIN; }
+      doc.textBlock("*  Reading fell outside the chart's range. The flow shown is the " +
+        "chart's nearest limit, not a measurement -- " + clamped +
+        (clamped === 1 ? " row is affected." : " rows are affected."),
+        MARGIN, y + 10, CONTENT_WIDTH, { size: 9, color: FLAG, italic: true });
     }
 
     drawFooter(doc);

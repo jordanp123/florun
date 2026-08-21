@@ -272,6 +272,113 @@
     ok("csv method column is the mode id", text.indexOf("manualEntry") > 0);
   })();
 
+  /* ── Audit fixes: range status, CSV safety, precision (A1-A5, S1) ──── */
+
+  (function () {
+    const core = F.core, csv = F.csv, fmt = F.format;
+
+    // A2. Chart lookups clamp, so a reading past the end of a table produces a
+    // real-looking number. Status is DERIVED from stored fields, so records
+    // written before the field existed still report correctly.
+    const weirOver = core.makeRecord({
+      mode: "weir", weirType: "v90", headInches: 30,
+      rate: F.weir.flowRate(30, "v90") });
+    const weirAt = core.makeRecord({
+      mode: "weir", weirType: "v90", headInches: 25,
+      rate: F.weir.flowRate(25, "v90") });
+    const weirUnder = core.makeRecord({
+      mode: "weir", weirType: "v90", headInches: 0.5,
+      rate: F.weir.flowRate(0.5, "v90") });
+    const weirOk = core.makeRecord({
+      mode: "weir", weirType: "v90", headInches: 13,
+      rate: F.weir.flowRate(13, "v90") });
+
+    eq("range: head above chart", core.rangeStatusFor(weirOver), core.RANGE.above);
+    eq("range: head at the limit is in range", core.rangeStatusFor(weirAt), core.RANGE.ok);
+    eq("range: head below minimum", core.rangeStatusFor(weirUnder), core.RANGE.below);
+    eq("range: head mid-table", core.rangeStatusFor(weirOk), core.RANGE.ok);
+    ok("range: clamped predicate agrees", core.rangeWasClamped(weirOver) &&
+       !core.rangeWasClamped(weirOk));
+
+    // The exact confusion this exists to remove: two different heads, one flow.
+    eq("clamped and limit readings are numerically identical", weirOver.gpm, weirAt.gpm);
+    ok("...but are distinguishable in export",
+       core.rangeStatusFor(weirOver) !== core.rangeStatusFor(weirAt));
+
+    const bucketOver = core.makeRecord({
+      mode: "timedVolume", volume: 20, volumeUnit: "bucket5", elapsedSeconds: 30,
+      rate: core.calculate(20, "bucket5", 30) });
+    const bucketOk = core.makeRecord({
+      mode: "timedVolume", volume: 6, volumeUnit: "bucket5", elapsedSeconds: 30,
+      rate: core.calculate(6, "bucket5", 30) });
+    const litres = core.makeRecord({
+      mode: "timedVolume", volume: 4, volumeUnit: "L", elapsedSeconds: 30,
+      rate: core.calculate(4, "L", 30) });
+    eq("range: bucket above chart", core.rangeStatusFor(bucketOver), core.RANGE.above);
+    eq("range: bucket in chart", core.rangeStatusFor(bucketOk), core.RANGE.ok);
+    eq("range: exact units involve no chart", core.rangeStatusFor(litres), core.RANGE.na);
+    eq("range: manual entry involves no chart",
+       core.rangeStatusFor(core.makeRecord({ mode: "manualEntry", rate: core.rateFromGPM(5) })),
+       core.RANGE.na);
+
+    // S1. Spreadsheet formula injection (CWE-1236). RFC 4180 quoting does not
+    // prevent it -- the quotes are stripped on parse and the formula evaluates.
+    eq("deFormula neutralizes =",  csv.deFormula("=1+1"), "'=1+1");
+    eq("deFormula neutralizes +",  csv.deFormula("+1"), "'+1");
+    eq("deFormula neutralizes -",  csv.deFormula("-2 in below crest"), "'-2 in below crest");
+    eq("deFormula neutralizes @",  csv.deFormula("@SUM(1)"), "'@SUM(1)");
+    eq("deFormula neutralizes tab", csv.deFormula("\tx"), "'\tx");
+    eq("deFormula leaves ordinary text alone", csv.deFormula("Outfall 3"), "Outfall 3");
+    eq("deFormula leaves an interior = alone", csv.deFormula("pH=7"), "pH=7");
+
+    const evil = core.makeRecord({
+      mode: "manualEntry", rate: core.rateFromGPM(5),
+      notes: "=HYPERLINK(\"http://x.tld\",\"go\")", siteLabel: "=cmd" });
+    const evilRow = csv.rowFor(evil);
+    ok("csv row escapes a formula in notes",
+       evilRow[csv.HEADERS.indexOf("Notes")].charAt(0) === "'");
+    ok("csv row escapes a formula in the site label",
+       evilRow[csv.HEADERS.indexOf("Site Label")].charAt(0) === "'");
+
+    // The guard must NOT touch numeric columns: a southern latitude and a
+    // western longitude both begin with "-", and quoting those corrupts data.
+    const southwest = core.makeRecord({
+      mode: "manualEntry", rate: core.rateFromGPM(5),
+      latitude: -33.8688, longitude: -151.2093 });
+    const swRow = csv.rowFor(southwest);
+    eq("negative latitude survives intact",
+       swRow[csv.HEADERS.indexOf("Latitude")], "-33.868800");
+    eq("negative longitude survives intact",
+       swRow[csv.HEADERS.indexOf("Longitude")], "-151.209300");
+
+    // A3. CSV precision must match the four significant figures the UI claims,
+    // not a fixed decimal count that turns a 4-figure chart value into 8.
+    eq("significantPlain rounds to 4 s.f.", fmt.significantPlain(1337.4567, 4), "1337");
+    eq("significantPlain trims trailing zeros", fmt.significantPlain(6855, 4), "6855");
+    eq("significantPlain handles small values", fmt.significantPlain(4.86215, 4), "4.862");
+    eq("significantPlain is ungrouped", fmt.significantPlain(999360, 4).indexOf(","), -1);
+    eq("significantPlain zero", fmt.significantPlain(0, 4), "0");
+    eq("csv gpm carries no invented precision",
+       csv.rowFor(weirOk)[csv.HEADERS.indexOf("GPM")], "1337");
+
+    // A2, export side.
+    eq("csv carries the range column",
+       csv.rowFor(weirOver)[csv.HEADERS.indexOf("Chart Range")], core.RANGE.above);
+    ok("Chart Range is a real column", csv.HEADERS.indexOf("Chart Range") > 0);
+
+    // Column count pinned to a literal: comparing against HEADERS.length is
+    // self-referential and cannot notice a column being added or dropped.
+    eq("csv column count", csv.HEADERS.length, 19);
+
+    // A1. The bucket model's dimensions are published so "verify against your
+    // own bucket" is an instruction someone can actually follow.
+    ok("bucket model is published", !!F.bucket.MODEL);
+    eq("bucket model height matches the chart", F.bucket.MODEL.heightInches, F.bucket.MAX_HEIGHT);
+    eq("bucket model brim matches the chart", F.bucket.MODEL.brimGallons, F.bucket.MAX_GALLONS);
+    ok("bucket model summary names all three dimensions",
+       /10\.0 in.*11\.3 in.*13\.75 in/.test(F.bucket.MODEL.summary));
+  })();
+
   /* ── Report ────────────────────────────────────────────────────────── */
 
   console.log("  " + pass + " passed, " + fail + " failed");

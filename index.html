@@ -118,6 +118,7 @@
       <div class="pane" id="pane-timedVolume">
         <div class="stopwatch" id="stopwatchDisplay" aria-live="off">00:00.00</div>
         <button type="button" class="btn btn-block btn-start" id="stopwatchBtn">Start</button>
+        <p class="warn" id="timerWarning" hidden></p>
 
         <div class="field">
           <div class="field-head">
@@ -129,10 +130,20 @@
             <select id="unitSelect" aria-label="Volume unit"></select>
           </div>
           <p class="warn" id="volumeWarning" hidden></p>
+          <!--
+            .hint is a flex row (icon + message), so the message MUST stay inside a
+            single child element. Left as bare text with inline <strong> tags, each
+            tag becomes its own flex item and the sentence renders as a column of
+            fragments. Same trap as the [hidden] override further up styles.css.
+          -->
           <p class="hint" id="bucketNote" hidden>
             <span aria-hidden="true">ⓘ</span>
-            Reference chart represents a generic 5-gallon bucket. Verify against your specific
-            bucket if precision matters.
+            <span>
+              Chart models a generic pail measuring <strong>10.0 in</strong> across the base,
+              <strong>11.3 in</strong> across the top and <strong>13.75 in</strong> deep.
+              Pails that differ hold more than this chart reports — commonly 5–10% more — so
+              measure yours against these figures before relying on the result.
+            </span>
           </p>
         </div>
       </div>

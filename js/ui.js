@@ -397,13 +397,16 @@
     $("clearBtn").hidden = !showClear;
   }
 
+  /* Shortest capture a person can plausibly fill and stop by hand, in seconds. */
+  const MIN_PLAUSIBLE_SECONDS = 2;
+
   /* Range and sanity warnings, one per mode. */
   function renderWarnings() {
     // Bucket height above the charted maximum.
     const unit = core.unitFor(unitId);
     const v = volumeNumber();
     let volWarn = null;
-    if (!unit.isDirectVolume && v !== null && v > FR.bucket.MAX_HEIGHT) {
+    if (!unit.isDirectVolume && v !== null && v > 0 && !FR.bucket.isInRange(v)) {
       volWarn = "Above chart range (max " + fmt.formatVolume(FR.bucket.MAX_HEIGHT) + " in / " +
         fmt.formatVolume(FR.bucket.MAX_GALLONS) + " gal). Result clamped.";
     } else if (unit.isDirectVolume && v !== null && v > 0 &&
@@ -416,12 +419,31 @@
     // Weir head outside the published table.
     const h = headNumber();
     let headWarn = null;
-    if (h !== null && h > 0) {
+    if (h !== null && h > 0 && !FR.weir.isInRange(h, weirTypeId)) {
       const min = FR.weir.minHead(weirTypeId), max = FR.weir.maxHead(weirTypeId);
       if (h > max) headWarn = "Head exceeds chart range (max " + fmt.formatVolume(max) + " in). Result clamped.";
-      else if (h < min) headWarn = "Head below chart minimum (" + fmt.formatVolume(min) + " in). Treated as no flow.";
+      else headWarn = "Head below chart minimum (" + fmt.formatVolume(min) + " in). Treated as no flow.";
     }
     setWarning("headWarning", headWarn);
+
+    /*
+     * Implausibly short capture. The volume field already warns when a value is
+     * far too large to be a field capture; timing had no equivalent, so a
+     * mis-tapped start/stop produced a number that looked entirely reasonable
+     * -- 1 gal in 0.5 s reads as 120 GPM. Nothing hand-filled completes in
+     * under a couple of seconds. Warns without blocking: the operator knows
+     * what they did, and a real short capture is theirs to keep.
+     */
+    let timerWarn = null;
+    if (mode === core.MODES.timedVolume.id &&
+        stopwatch.state === FR.stopwatch.STATE.stopped) {
+      const e = stopwatch.elapsedNow();
+      if (isFinite(e) && e > 0 && e < MIN_PLAUSIBLE_SECONDS) {
+        timerWarn = "Only " + fmt.formatElapsed(e) + " elapsed — too short for a hand-filled " +
+          "capture. Check the timer before saving.";
+      }
+    }
+    setWarning("timerWarning", timerWarn);
 
     // Implausible manual entry.
     const g = manualNumber();

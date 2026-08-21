@@ -46,13 +46,40 @@
    * risk of `Math.floor(Math.log10(1000))` landing on 2.
    * 999360 at 4 s.f. -> "999,400", matching the iOS NumberFormatter.
    */
+  /*
+   * Round to `digits` significant figures. Returns [rounded, decimalPlaces].
+   * toExponential does the rounding so that Math.floor(Math.log10(1000)) style
+   * off-by-ones cannot happen at exact powers of ten.
+   */
+  function significantParts(v, digits) {
+    const es = Number(v).toExponential(Math.max(0, Math.min(100, digits - 1)));
+    const exp = parseInt(es.slice(es.indexOf("e") + 1), 10);
+    return [Number(es), Math.max(0, Math.min(20, digits - 1 - exp))];
+  }
+
   function groupSignificant(v, digits) {
     if (v === 0) return "0";
-    const es = Number(v).toExponential(Math.max(0, Math.min(100, digits - 1)));
-    const rounded = Number(es);
-    const exp = parseInt(es.slice(es.indexOf("e") + 1), 10);
-    const decimals = Math.max(0, Math.min(20, digits - 1 - exp));
-    return groupFixed(rounded, decimals);
+    const p = significantParts(v, digits);
+    return groupFixed(p[0], p[1]);
+  }
+
+  /*
+   * Significant-figure rounding as a PLAIN, ungrouped decimal string -- the
+   * machine-readable counterpart to groupSignificant, for the CSV.
+   *
+   * The CSV used to write a fixed number of DECIMALS, which let a value read
+   * off a 4-significant-figure chart leave as "6855.0000". Anyone opening that
+   * file sees eight significant figures and no reason to doubt them. Exporting
+   * exactly the precision the display claims is the honest form.
+   */
+  function significantPlain(v, digits) {
+    const n = Number(v);
+    if (!isFinite(n)) return "";
+    if (n === 0) return "0";
+    const p = significantParts(n, digits);
+    let s = p[0].toFixed(p[1]);
+    if (s.indexOf(".") >= 0) s = s.replace(/0+$/, "").replace(/\.$/, "");
+    return s;
   }
 
   /* Fixed decimals with trailing zeros trimmed, integer part comma-grouped. */
@@ -188,7 +215,7 @@
 
   FR.format = {
     DASH,
-    formatFlow, formatVolume, formatGallons,
+    formatFlow, formatVolume, formatGallons, significantPlain,
     formatElapsed, formatStopwatch,
     parseDecimal, toISO,
     formatTimestampMedium, formatTimestampShort, formatTimestampList,

@@ -143,9 +143,43 @@
     return persist();
   }
 
+  /*
+   * Every quarantined copy of a previous history, by key.
+   *
+   * quarantine() preserves unparseable history under a timestamped key rather
+   * than discarding it, which is the right call for recovery -- but those
+   * copies hold site labels, notes and GPS fixes verbatim, and nothing in the
+   * UI ever mentions them. Left alone they outlive the data the user thinks
+   * they deleted.
+   */
+  function quarantineKeys() {
+    const store = ls();
+    if (!store) return [];
+    const prefix = HISTORY_KEY + ".corrupted-";
+    const keys = [];
+    try {
+      for (let i = 0; i < store.length; i++) {
+        const k = store.key(i);
+        if (k && k.indexOf(prefix) === 0) keys.push(k);
+      }
+    } catch (e) { /* enumeration blocked: nothing further to do */ }
+    return keys;
+  }
+
+  /*
+   * Clearing means clearing. Photos referenced by live records go here; any
+   * photo referenced only by a quarantined copy is collected by
+   * sweepOrphanPhotos() at next startup, since nothing references it then.
+   */
   function clearAll() {
     const items = load();
     items.forEach(function (r) { if (r.photoId) deletePhoto(r.photoId); });
+    const store = ls();
+    if (store) {
+      quarantineKeys().forEach(function (k) {
+        try { store.removeItem(k); } catch (e) {}
+      });
+    }
     cache = [];
     return persist();
   }
@@ -280,7 +314,7 @@
 
   FR.store = {
     MAX_ITEMS,
-    all, newestFirst, get, count, append, update, remove, clearAll,
+    all, newestFirst, get, count, append, update, remove, clearAll, quarantineKeys,
     putPhoto, getPhoto, deletePhoto, sweepOrphanPhotos,
     pref, setPref, removePref,
     requestPersistence, estimateUsage,

@@ -247,6 +247,46 @@
     eq("offsets still exact with escaped + high-byte text", s.slice(startxref, startxref + 4), "xref");
   })();
 
+  /* ── Exported PDFs disclose clamping and basis (A2, A5) ───────────── */
+
+  (function () {
+    const F = self.FloRun, core = self.FloRun.core;
+    function pdfText(rec) { return toStr(F.exporter.buildSinglePDF(rec, null)); }
+
+    const clamped = core.makeRecord({
+      mode: "weir", weirType: "v90", headInches: 30,
+      rate: F.weir.flowRate(30, "v90") });
+    const inRange = core.makeRecord({
+      mode: "weir", weirType: "v90", headInches: 13,
+      rate: F.weir.flowRate(13, "v90") });
+
+    const clampedTxt = pdfText(clamped), inRangeTxt = pdfText(inRange);
+
+    ok("clamped measurement PDF says so", clampedTxt.indexOf("ABOVE CHART") > 0);
+    ok("in-range measurement PDF does not", inRangeTxt.indexOf("ABOVE CHART") < 0);
+    ok("clamped PDF is still structurally valid",
+       clampedTxt.slice(0, 5) === "%PDF-" && clampedTxt.indexOf("%%EOF") > 0 &&
+       clampedTxt.indexOf("xref") > 0);
+
+    ok("measurement PDF states its basis", clampedTxt.indexOf("Basis:") > 0);
+    ok("weir basis names the discharge table", clampedTxt.indexOf("discharge table") > 0);
+
+    const bucketTxt = pdfText(core.makeRecord({
+      mode: "timedVolume", volume: 6, volumeUnit: "bucket5", elapsedSeconds: 30,
+      rate: core.calculate(6, "bucket5", 30) }));
+    ok("bucket basis names the pail model and its spread",
+       bucketTxt.indexOf("generic 5-gallon pail") > 0 && bucketTxt.indexOf("5-10%") > 0);
+
+    // History table: the marker, and a footnote that explains it.
+    const hist = toStr(F.exporter.buildHistoryPDF([clamped, inRange]));
+    ok("history PDF footnotes the clamp marker", hist.indexOf("outside the chart") > 0);
+    ok("history footnote counts affected rows", hist.indexOf("1 row is affected") > 0);
+    ok("history PDF omits the footnote when nothing is clamped",
+       toStr(F.exporter.buildHistoryPDF([inRange])).indexOf("outside the chart") < 0);
+    ok("history PDF is structurally valid",
+       hist.slice(0, 5) === "%PDF-" && hist.indexOf("%%EOF") > 0);
+  })();
+
   console.log("  " + pass + " passed, " + fail + " failed");
   if (fail) {
     failures.forEach(function (f) { console.log("  FAIL: " + f); });

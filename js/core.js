@@ -120,6 +120,53 @@
     return toUSGallons(r.volume, r.volumeUnit);
   }
 
+  /* ── Chart range ───────────────────────────────────────────────────── */
+
+  /*
+   * Both chart lookups CLAMP at their limits: a head past the end of the weir
+   * table returns the last charted value, and so does the one before it. The
+   * on-screen warning says so, but a warning is not part of the record -- so a
+   * clamped reading used to leave in a PDF or CSV as a precise-looking number
+   * with nothing to distinguish it from a real one.
+   *
+   * This is DERIVED, never stored: every input it needs (mode, head, volume,
+   * unit) is already in the record. Records saved before this existed report
+   * correctly, and there is no migration to get wrong.
+   */
+  const RANGE = {
+    na:    "",
+    ok:    "in range",
+    above: "above chart (clamped)",
+    below: "below chart (no flow)",
+  };
+
+  function rangeStatusFor(rec) {
+    if (!rec) return RANGE.na;
+
+    if (rec.mode === MODES.weir.id) {
+      const h = Number(rec.headInches);
+      if (!isFinite(h) || h <= 0) return RANGE.na;
+      if (FR.weir.isInRange(h, rec.weirType)) return RANGE.ok;
+      return h > FR.weir.maxHead(rec.weirType) ? RANGE.above : RANGE.below;
+    }
+
+    // Only the bucket unit is a chart lookup; mL/L/fl oz/gal are exact.
+    if (rec.mode === MODES.timedVolume.id &&
+        rec.volumeUnit && !unitFor(rec.volumeUnit).isDirectVolume) {
+      const v = Number(rec.volume);
+      if (!isFinite(v) || v <= 0) return RANGE.na;
+      return FR.bucket.isInRange(v) ? RANGE.ok : RANGE.above;
+    }
+
+    return RANGE.na;   // direct volume and manual entry involve no chart
+  }
+
+  /* True when a record was clamped -- the case worth calling out in a export. */
+  function rangeWasClamped(rec) {
+    const st = rangeStatusFor(rec);
+    return st === RANGE.above || st === RANGE.below;
+  }
+
   /*
    * RFC 4122 v4 identifier. crypto.randomUUID isn't available on every iOS
    * Safari we care about, so fall back to getRandomValues, and to Math.random
@@ -147,6 +194,7 @@
     MODES, MODE_ORDER,
     ZERO_RATE, rateIsValid, calculate, rateFromGPM,
     makeRecord, recordHasLocation, recordHasPhoto, recordVolumeInUSGallons,
+    RANGE, rangeStatusFor, rangeWasClamped,
     uuid,
   };
 })(typeof self !== "undefined" ? self : this);

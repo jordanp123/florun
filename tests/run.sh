@@ -31,7 +31,7 @@ runbundle "core: charts, conversions, flow math, CSV" \
 runbundle "pdf writer: structure, escaping, JPEG parsing" \
   "$DIR/tests/_shim.js" \
   "$DIR/js/format.js" "$DIR/js/bucket-chart.js" "$DIR/js/weir-chart.js" \
-  "$DIR/js/core.js" "$DIR/js/pdf.js" \
+  "$DIR/js/core.js" "$DIR/js/pdf.js" "$DIR/js/export.js" \
   "$DIR/tests/test_pdf.js"
 
 # Deployment sanity: the quadlet units, Dockerfile and nginx config must agree
@@ -51,6 +51,27 @@ for f in format bucket-chart weir-chart core csv pdf store photos geo stopwatch 
   grep -q "js/$f.js" "$DIR/sw.js"      || { echo "  MISSING js/$f.js in sw.js precache list"; miss=1; fail=1; }
 done
 [ $miss -eq 0 ] && echo "  ok: all 13 runtime scripts referenced and precached"
+echo ""
+
+# Guard: every element id ui.js reaches for must exist in index.html. A typo
+# here fails silently -- the warning or field simply never appears, and no
+# headless bundle can catch it because none of them load the DOM.
+echo "== ui.js element ids all exist in index.html =="
+if python3 - "$DIR" <<'PYEOF'; then :; else fail=1; fi
+import io, re, sys
+root = sys.argv[1]
+ui = io.open(root + "/js/ui.js", encoding="utf-8").read()
+html = io.open(root + "/index.html", encoding="utf-8").read()
+want = set(re.findall(r'\$\("([A-Za-z0-9_-]+)"\)', ui))
+want |= set(re.findall(r'setWarning\("([A-Za-z0-9_-]+)"', ui))
+have = set(re.findall(r'id="([A-Za-z0-9_-]+)"', html))
+missing = sorted(want - have)
+if missing:
+    for m in missing:
+        print("  MISSING id=\"%s\" in index.html (referenced by ui.js)" % m)
+    raise SystemExit(1)
+print("  ok: all %d referenced ids present" % len(want))
+PYEOF
 echo ""
 
 # The service worker cache version must be bumped whenever assets change; a

